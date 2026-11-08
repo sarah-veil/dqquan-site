@@ -7,7 +7,7 @@
 import re, os, sys, html, glob, shutil, subprocess
 from pathlib import Path
 
-ROOT = Path("/Users/apple/CodexProjects/dqquan_home")
+ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src" / "html"
 COVERS = ROOT / "img" / "covers"
 

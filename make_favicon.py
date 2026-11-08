@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """生成站点图标：朱红方印 + 白「泉」，输出 favicon 32/64/180 PNG。"""
+from pathlib import Path
+
 from PIL import Image, ImageDraw, ImageFont
 
 RED = (166, 58, 44, 255)     # #a63a2c 与站点印章同色
 WHITE = (251, 250, 247, 255)  # #fbfaf7 纸白
 FONT = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
-OUT = "/Users/apple/CodexProjects/dqquan_home/"
+OUT = str(Path(__file__).resolve().parent) + "/"
 
 for size in (32, 64, 180, 512):
     S = size * 8                      # 8x 超采样再缩，边缘干净

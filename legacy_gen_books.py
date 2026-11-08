@@ -8,9 +8,10 @@
    ✍️ 思考沉淀/半亩方塘_重温百部名著/书单排期_半亩方塘.md
 """
 import re, html, datetime, os
+from pathlib import Path
 
 VAULT = "/Volumes/home/knowledge-vault/✍️ 思考沉淀/半亩方塘_重温百部名著/"
-OUT = "/Users/apple/CodexProjects/dqquan_home/"
+OUT = str(Path(__file__).resolve().parent) + "/"
 SITE = "https://dqquan.com"
 
 tai = open(VAULT + "发布记录_台账.md", encoding="utf-8").read()
