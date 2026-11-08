@@ -82,6 +82,8 @@ COUNTRIES = [
     ),
 ]
 
+COUNTRY_NAMES = {c["slug"]: c["name"] for c in COUNTRIES}
+
 # 这些期的封面是公众号成版图（图上自带书名/期号/印章），页面不再叠字
 BAKED_COVER = set(range(2, 23)) | {26, 27, 28, 29}
 
@@ -424,7 +426,7 @@ def build_book_page(b: dict, books: list) -> None:
             scene_block = f"""<aside class="book-scene" aria-label="书边影像">
   <a href="../../photos/{slug}/"><img src="../../img/countries/{image}" alt="{html.escape(caption)}" width="800" height="1000" loading="lazy" decoding="async"></a>
   <div>
-    <p class="scene-label">书边影像 · {year} · {slug.split('-')[0].title()}</p>
+    <p class="scene-label">书边影像 · {year} · {COUNTRY_NAMES.get(slug, slug.split('-')[0].title())}</p>
     <blockquote>{html.escape(caption)}</blockquote>
     <p class="scene-note">照片不为这一期作注，只在书页合上以后，留一块外景。</p>
     <a class="scene-link" href="../../photos/{slug}/">走进这组影像 →</a>
