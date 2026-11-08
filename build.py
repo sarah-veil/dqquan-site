@@ -794,6 +794,24 @@ footer a{{text-decoration:none;border-bottom:1px solid var(--line)}}
     write(ROOT / "books" / "index.html", page)
 
 
+def build_books_all_index(books: list) -> None:
+    """生成 /books/all/ 骨架；结构定稿前保持 noindex。"""
+    template = (ROOT / "src" / "html" / "all.html").read_text(encoding="utf-8")
+    rows = []
+    published = [b for b in books if b["no"] > 0]
+    for b in sorted(published, key=lambda item: item["no"]):
+        author = BOOK_META.get(b["no"], ("泉森", ""))[0]
+        rows.append(
+            f'    <li><a href="../{b["slug"]}/"><span class="no">{b["no"]:02d}</span>'
+            f'<strong>{html.escape(b["title"])}</strong>'
+            f'<small>{html.escape(author)}</small></a></li>'
+        )
+    page = template.replace("{{COUNT}}", str(len(published))).replace(
+        "{{BOOK_LIST}}", "\n".join(rows)
+    )
+    write(ROOT / "books" / "all" / "index.html", page)
+
+
 # ── 国家相册 ─────────────────────────────────────────────────────────
 def photo_page(c: dict, prev_c, next_c) -> str:
     figs = []
@@ -1366,6 +1384,8 @@ def main():
             build_legacy_redirect(b)
         print("\n[目录] 分组 + 进度")
         build_books_index(books)
+        print("\n[目录] 书目一览骨架")
+        build_books_all_index(books)
 
     if what in ("all", "404"):
         print("\n[404]")
