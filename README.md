@@ -14,6 +14,7 @@
 
 ```
 src/
+  html/index.html   ✅ 首页模板，由 build 生成根目录 index.html
   html/NN.html      ✅ 书页正文正本（00=序）。改内容改这里。
   NN.md             原始 Markdown 稿（归档用，不参与构建）
 books/
@@ -24,7 +25,7 @@ photos/
   index.html        ✅ 手写（国家索引；缩略图链接指向各国相册）
   <slug>/index.html ⚙️ 生成物（国家相册，数据在 build.py 的 COUNTRIES）
 about/index.html    ✅ 手写（正文由老爷写；build 只在不存在时建骨架）
-index.html          ✅ 手写（首页；build 只补 OG 和期号链接）
+index.html          ⚙️ 生成物（由 src/html/index.html 生成）
 img/countries/
   *.jpg             ✅ 原图（点开看大图用）
   w800/ w1600/      ⚙️ 生成物（WebP 两档，给 srcset 用）

@@ -895,10 +895,11 @@ def build_photo_pages() -> None:
         write(ROOT / "photos" / c["slug"] / "index.html", photo_page(c, prev_c, next_c))
 
 
-# ── 首页 / 影像索引：加 OG、链接指向新地址 ──────────────────────────
+# ── 首页 / 影像索引：从源模板生成，补 OG 与期号链接 ────────────────
 def upgrade_static_pages(books: list) -> None:
     idx = ROOT / "index.html"
-    s = idx.read_text(encoding="utf-8")
+    src = ROOT / "src" / "html" / "index.html"
+    s = src.read_text(encoding="utf-8")
     for b in books:
         if b["no"] == 0:
             continue
@@ -925,7 +926,7 @@ def upgrade_static_pages(books: list) -> None:
         f"{SERIF_STACK}",
     )
     idx.write_text(s, encoding="utf-8")
-    print(f"  ✓ {rel(idx)}（OG + 期号链接）")
+    print(f"  ✓ {rel(idx)}（由 {rel(src)} 生成）")
 
     ph = ROOT / "photos" / "index.html"
     t = ph.read_text(encoding="utf-8")
