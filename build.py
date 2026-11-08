@@ -42,9 +42,11 @@ IMAGE_SUFFIXES = {
 PRIVATE_TERMS = (
     "宁波银行", "绍兴分行", "副行长", "纪委书记", "风险运营",
 )
-METADATA_ARGS = (
-    "-EXIF:all", "-XMP:all", "-IPTC:all", "-Photoshop:all",
-    "-MakerNotes:all", "-GPS:all",
+IMAGE_BUDGET_MB = 40
+SENSITIVE_METADATA = (
+    "$GPSLatitude or $GPSLongitude or $GPSPosition or "
+    "$SerialNumber or $BodySerialNumber or $InternalSerialNumber or "
+    "$DateTimeOriginal or $CreateDate or $XMP:all or $IPTC:all"
 )
 HARDENING_META = """<meta name="referrer" content="strict-origin-when-cross-origin">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
@@ -113,6 +115,9 @@ def mtime_iso(path: Path) -> str:
 
 
 def write(path: Path, content: str) -> None:
+    if path.exists() and path.read_text(encoding="utf-8") == content:
+        print(f"  · {rel(path)} 未变化")
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     print(f"  ✓ {rel(path)}")
@@ -927,8 +932,8 @@ def upgrade_static_pages(books: list) -> None:
         '"Songti SC","Noto Serif CJK SC","Source Han Serif SC","STSong",serif',
         f"{SERIF_STACK}",
     )
-    idx.write_text(s, encoding="utf-8")
-    print(f"  ✓ {rel(idx)}（由 {rel(src)} 生成）")
+    write(idx, s)
+    print(f"  · {rel(idx)} 由 {rel(src)} 生成")
 
     ph = ROOT / "photos" / "index.html"
     t = ph.read_text(encoding="utf-8")
@@ -963,8 +968,21 @@ def upgrade_static_pages(books: list) -> None:
         '"Songti SC","Noto Serif CJK SC",serif',
         f"{SERIF_STACK}",
     )
-    ph.write_text(t, encoding="utf-8")
-    print(f"  ✓ {rel(ph)}（OG + 相册入口）")
+    write(ph, t)
+    print(f"  · {rel(ph)} 已处理 OG + 相册入口")
+
+
+def git_lastmod(path: Path) -> str:
+    """返回正文元数据在 Git 中的最后日期；无历史时回退文件日期。"""
+    target = path.relative_to(ROOT).as_posix()
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%cs", "--", target],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value else mtime_iso(path)
 
 
 # ── sitemap / 404 / 关于 ─────────────────────────────────────────────
@@ -979,18 +997,16 @@ def build_sitemap(books: list) -> None:
     <priority>{priority}</priority>
   </url>""")
 
-    add(f"{SITE}/", mtime_iso(ROOT / "index.html"), "1.0")
-    add(f"{SITE}/books/", mtime_iso(ROOT / "books" / "index.html"), "0.9", "weekly")
+    add(f"{SITE}/", git_lastmod(ROOT / "src" / "html" / "index.html"), "1.0")
+    add(f"{SITE}/books/", git_lastmod(ROOT / "src" / "html"), "0.9", "weekly")
     for b in books:
-        p = ROOT / "books" / b["slug"] / "index.html"
-        add(f"{SITE}/books/{b['slug']}/", mtime_iso(p if p.exists() else b["path"]), "0.8")
-    add(f"{SITE}/photos/", mtime_iso(ROOT / "photos" / "index.html"), "0.9", "weekly")
+        add(f"{SITE}/books/{b['slug']}/", git_lastmod(b["source"]), "0.8")
+    add(f"{SITE}/photos/", git_lastmod(ROOT / "photos" / "index.html"), "0.9", "weekly")
     for c in COUNTRIES:
-        p = ROOT / "photos" / c["slug"] / "index.html"
-        add(f"{SITE}/photos/{c['slug']}/", mtime_iso(p), "0.7")
+        add(f"{SITE}/photos/{c['slug']}/", git_lastmod(ROOT / "build.py"), "0.7")
     about = ROOT / "about" / "index.html"
     if about.exists():
-        add(f"{SITE}/about/", mtime_iso(about), "0.6", "yearly")
+        add(f"{SITE}/about/", git_lastmod(about), "0.6", "yearly")
 
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -1155,18 +1171,30 @@ def sync_about_latest(books: list) -> None:
         flags=re.S,
     )
     if count:
-        out.write_text(updated, encoding="utf-8")
-        print(f"  ✓ {rel(out)} 最新一期 → 第 {latest['no']} 期")
+        if updated != text:
+            out.write_text(updated, encoding="utf-8")
+            print(f"  ✓ {rel(out)} 最新一期 → 第 {latest['no']} 期")
+        else:
+            print(f"  · {rel(out)} 最新一期未变化")
 
 
 # ── 主流程 ───────────────────────────────────────────────────────────
-def image_metadata(path: Path) -> str:
+def images_with_sensitive_metadata(paths: list[Path]) -> list[Path]:
+    """一次 exiftool 进程筛出带 EXIF/XMP/IPTC/GPS 的图片。"""
+    if not paths:
+        return []
     result = subprocess.run(
-        ["exiftool", "-q", "-s", *METADATA_ARGS, str(path)],
+        [
+            "exiftool", "-q", "-m", "-if", SENSITIVE_METADATA,
+            "-p", "$FilePath", *map(str, paths),
+        ],
         capture_output=True,
         text=True,
     )
-    return result.stdout.strip()
+    # exiftool 在没有任何文件命中 -if 时返回 2。
+    if result.returncode not in (0, 2):
+        raise SystemExit(f"!! 图片元数据扫描失败：{result.stderr.strip()[:300]}")
+    return [Path(line) for line in result.stdout.splitlines() if line.strip()]
 
 
 def bake_orientation(path: Path) -> None:
@@ -1214,7 +1242,7 @@ def strip_img_metadata() -> None:
     if not shutil.which("exiftool"):
         raise SystemExit("!! 没装 exiftool，没法剥图片元数据 —— 构建中止（别带着 EXIF 发布）")
 
-    dirty = [q for q in targets if image_metadata(q)]
+    dirty = images_with_sensitive_metadata(targets)
     if dirty:
         print(f"  · 剥元数据：{len(dirty)} 张（EXIF/XMP/IPTC/GPS/机身信息）")
         for q in dirty:
@@ -1229,11 +1257,28 @@ def strip_img_metadata() -> None:
         )
         if result.returncode:
             raise SystemExit(f"!! 图片元数据清理失败：{result.stderr.strip()[:300]}")
-        remaining = [str(q) for q in dirty if image_metadata(q)]
+        remaining = [str(q) for q in images_with_sensitive_metadata(dirty)]
         if remaining:
             raise SystemExit("!! 图片元数据仍有残留：" + "、".join(remaining[:8]))
     else:
         print(f"  · 图片元数据：{len(targets)} 张已干净")
+
+
+def check_image_budget() -> None:
+    total = sum(
+        path.stat().st_size
+        for folder in (ROOT / "img", ROOT / "photos")
+        if folder.exists()
+        for path in folder.rglob("*")
+        if path.is_file()
+    )
+    total_mb = total / (1024 * 1024)
+    if total_mb > IMAGE_BUDGET_MB:
+        print(
+            f"  ⚠ 图片预算超限：{total_mb:.1f} MB > {IMAGE_BUDGET_MB} MB"
+        )
+    else:
+        print(f"  · 图片预算：{total_mb:.1f} MB / {IMAGE_BUDGET_MB} MB")
 
 
 def audit_public_surface() -> None:
@@ -1301,6 +1346,7 @@ def main():
     print(f"读到 {len(books)} 个书页（含序）")
     print("\n[体检] 图片元数据（EXIF/GPS）")
     strip_img_metadata()
+    check_image_budget()
 
     if what in ("all", "books"):
         print("\n[书页] 三位期号 + OG + 翻页")
