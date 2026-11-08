@@ -33,11 +33,14 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
 
 
-def tracked_files() -> list[str]:
-    result = run(["git", "ls-files", "-z"])
-    if result.returncode:
-        raise SystemExit(f"git ls-files 失败：{result.stderr.strip()}")
-    return [name for name in result.stdout.split("\0") if name]
+def visible_files() -> list[str]:
+    return [
+        path.relative_to(ROOT).as_posix()
+        for path in ROOT.rglob("*")
+        if path.is_file()
+        and ".git" not in path.parts
+        and "__pycache__" not in path.parts
+    ]
 
 
 def check_domain(errors: list[str]) -> None:
@@ -103,7 +106,7 @@ def check_image_metadata(files: list[str], errors: list[str]) -> None:
 
 def main() -> int:
     errors: list[str] = []
-    files = tracked_files()
+    files = visible_files()
     check_domain(errors)
     check_repo_references(files, errors)
     check_image_metadata(files, errors)

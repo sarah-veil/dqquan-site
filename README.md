@@ -28,7 +28,7 @@ about/index.html    ✅ 手写（正文由老爷写；build 只在不存在时�
 index.html          ⚙️ 生成物（由 src/html/index.html 生成）
 img/countries/
   *.jpg             ✅ 原图（点开看大图用）
-  w800/ w1600/      ⚙️ 生成物（WebP 两档，给 srcset 用）
+  w240/ w480/ w800/ w1600/ ⚙️ 生成物（WebP 四档，给 srcset 用）
 sitemap.xml         ⚙️ 生成物（全量收录）
 404.html            ⚙️ 生成物
 ```
@@ -41,8 +41,9 @@ python3 build.py books      # 只重建书页
 python3 build.py photos     # 只重建相册
 python3 build.py sitemap    # 只重建 sitemap
 python3 build.py feed       # 只重建 RSS
+python3 publish_check.py    # 发布前只读检查：CNAME、旧库路径、图片元数据
 
-python3 make_images.py      # 生成 WebP 两档（新增国家照片后跑）
+python3 make_images.py      # 生成 WebP 四档（新增国家照片后跑）
 ```
 
 幂等，可反复跑。**改完本地起服务看一遍再推：**
