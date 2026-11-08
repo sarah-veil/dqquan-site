@@ -1,0 +1,1350 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+dqquan.com 站点构建脚本
+
+一期：三位期号 + 旧链接兼容页 + 全量 sitemap + OG 卡片 + 404 + 国家相册
+二期：图片 srcset 挂接 + 翻页 + 目录分组 + 关于页骨架
+
+用法：
+    python3 build.py            # 构建全部
+    python3 build.py books      # 只重建书页
+    python3 build.py photos     # 只重建相册
+    python3 build.py sitemap    # 只重建 sitemap/404
+
+原则：幂等。可反复跑。不删除任何原文件（旧链接用兼容页占位）。
+"""
+import os
+import re
+import sys
+import json
+import html
+import shutil
+import subprocess
+from pathlib import Path
+from datetime import datetime, timezone
+from email.utils import format_datetime
+
+ROOT = Path(__file__).resolve().parent
+SITE = "https://dqquan.com"
+TZ = timezone.utc
+
+OG_IMAGE = f"{SITE}/img/photo-3.jpg"
+SERIF_STACK = '"Songti SC","Noto Serif CJK SC","Source Han Serif SC","Noto Serif SC","STSong",serif'
+COVER_WIDTH = 1400
+COVER_HEIGHT = 595
+COVER_SMALL_WIDTH = 640
+COVER_SMALL_HEIGHT = 272
+CONTACT_EMAIL = "quan@dqquan.com"
+IMAGE_SUFFIXES = {
+    ".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".heic", ".avif",
+}
+PRIVATE_TERMS = (
+    "宁波银行", "绍兴分行", "副行长", "纪委书记", "风险运营",
+)
+METADATA_ARGS = (
+    "-EXIF:all", "-XMP:all", "-IPTC:all", "-Photoshop:all",
+    "-MakerNotes:all", "-GPS:all",
+)
+HARDENING_META = """<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+"""
+
+# ── 国家相册数据（图注取自 photos/index.html 现有内容）────────────────
+COUNTRIES = [
+    dict(
+        slug="peru-2026", year="2026", name="秘鲁", key="peru",
+        lead="从太平洋岸到高原湿地，留下三帧关于花、水与岩壁的画面。",
+        photos=[("peru-01.jpg", "紫色花穗上的蜂鸟", "tall"),
+                ("peru-02.jpg", "浅水中觅食的火烈鸟", "tall"),
+                ("peru-03.jpg", "岩壁上的印加燕鸥", "tall")],
+    ),
+    dict(
+        slug="colombia-2019", year="2019", name="哥伦比亚", key="colombia",
+        lead="安第斯山把云雾林、花朵和蜂鸟放在同一片山坡上。",
+        photos=[("colombia-01.jpg", "蜂鸟停在橙色钟形花前", "wide"),
+                ("colombia-02.jpg", "正面悬停的蜂鸟", "tall"),
+                ("colombia-03.jpg", "云雾林中的安第斯冠伞鸟", "wide")],
+    ),
+    dict(
+        slug="kenya-2017", year="2017", name="肯尼亚", key="kenya",
+        lead="草原上的一天，从狮子的脚步开始，在落日和飞鸟里结束。",
+        photos=[("kenya-01.jpg", "草原上迎面走来的雄狮", "tall"),
+                ("kenya-02.jpg", "草原落日", "wide"),
+                ("kenya-03.jpg", "掠过水面的火烈鸟", "wide")],
+    ),
+    dict(
+        slug="norway-2015", year="2015", name="挪威", key="norway",
+        lead="一条跨海的路，一排临水的木屋，以及天色将暗时的峡湾。",
+        photos=[("norway-01.jpg", "大西洋海滨公路", "wide"),
+                ("norway-02.jpg", "卑尔根布吕根木屋", "wide"),
+                ("norway-03.jpg", "暮色中的峡湾小镇", "wide")],
+    ),
+]
+
+# 这些期的封面是公众号成版图（图上自带书名/期号/印章），页面不再叠字
+BAKED_COVER = set(range(2, 23)) | {26, 27, 28, 29}
+
+CSS_TOKENS = """:root{--paper:#f7f4ed;--ink:#201f1b;--ink-2:#5f5b53;--ink-3:#6f685f;--line:#d7d0c2;--line-dark:#b9b0a1;--seal:#9b3227}"""
+
+ARTICLE_NAV_CSS = """
+  a:focus-visible{outline:2px solid var(--seal);outline-offset:4px}
+  header nav{display:flex;align-items:center;gap:22px}
+  header nav a{display:inline-flex;align-items:center;justify-content:center;min-width:44px;min-height:44px;letter-spacing:.12em}
+  header nav a[aria-current="page"]{color:var(--seal)}
+  @media (max-width:640px){
+    header{align-items:center}
+    header nav{gap:10px}
+    header nav a{font-size:11px;letter-spacing:.06em}
+    footer a{display:inline-flex;align-items:center;min-height:44px}
+  }
+"""
+
+
+def rel(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
+def mtime_iso(path: Path) -> str:
+    ts = datetime.fromtimestamp(path.stat().st_mtime, tz=TZ)
+    return ts.strftime("%Y-%m-%d")
+
+
+def write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    print(f"  ✓ {rel(path)}")
+
+
+def scrub_public_emails() -> None:
+    """把除关于页外的公开邮箱统一收口为「关于」链接。"""
+    about = ROOT / "about" / "index.html"
+    pattern = re.compile(
+        rf'<a\s+href="mailto:{re.escape(CONTACT_EMAIL)}"[^>]*>.*?</a>',
+        flags=re.I | re.S,
+    )
+    changed = []
+    for p in ROOT.rglob("*.html"):
+        if ".git" in p.parts or p == about:
+            continue
+        text = p.read_text(encoding="utf-8")
+        if p.parent == ROOT / "src" / "html":
+            # 这些源页构建时会整体上移一层，链接要先按 books/NN.html 写。
+            rel_about = Path("../about/index.html")
+        else:
+            rel_about = Path(os.path.relpath(about, p.parent))
+        replacement = f'<a href="{rel_about}">关于</a>'
+        updated, count = pattern.subn(replacement, text)
+        updated = re.sub(
+            r'(<footer><a href="\.\./index\.html">泉森 · 半亩方塘</a> · )'
+            r'<a href="(?:\.\./)+about/index\.html">关于</a>(</footer>)',
+            rf'\g<1><a href="{rel_about.as_posix()}">关于</a>\g<2>',
+            updated,
+            count=1,
+        )
+        if updated != text:
+            p.write_text(updated, encoding="utf-8")
+            changed.append(rel(p))
+    if changed:
+        print(f"  · 收口公开邮箱：{len(changed)} 个页面")
+
+
+def harden_html_heads() -> None:
+    """给静态页补可用的浏览器级安全策略；HTTP 头仍建议在 Cloudflare 配。"""
+    changed = 0
+    for p in ROOT.rglob("*.html"):
+        if ".git" in p.parts:
+            continue
+        text = p.read_text(encoding="utf-8")
+        if 'name="referrer"' in text or "<head>" not in text:
+            continue
+        p.write_text(text.replace("<head>", "<head>\n" + HARDENING_META, 1), encoding="utf-8")
+        changed += 1
+    if changed:
+        print(f"  · 安全头：更新 {changed} 个页面")
+
+
+# ── 书目 ─────────────────────────────────────────────────────────────
+def load_books():
+    """读取 src/html/NN.html（正文正本），返回按数字排序的列表。
+
+    ⚠️ 正本在 src/html/，不在 books/ —— books/NN.html 会被 build 写成兼容跳转页，
+    所以绝不能拿 books/ 当源，否则第二次跑就把正文覆盖没了（2026-10-24 踩过）。
+    """
+    books = []
+    src_dir = ROOT / "src" / "html"
+    for p in sorted(src_dir.glob("*.html")):
+        if p.name == "index.html":
+            continue
+        m = re.fullmatch(r"(\d+)\.html", p.name)
+        if not m:
+            continue
+        no = int(m.group(1))
+        src = p.read_text(encoding="utf-8")
+        tm = re.search(r"<title>([^<]+)</title>", src)
+        title = html.unescape(tm.group(1)).split(" · ")[0].strip() if tm else f"第{no}期"
+        books.append(dict(no=no, slug=f"{no:03d}", title=title,
+                          path=ROOT / "books" / p.name, source=p, html=src))
+    books.sort(key=lambda b: b["no"])
+    return books
+
+
+OG_BLOCK = """<meta name="description" content="{desc}">
+<meta property="og:site_name" content="半亩方塘">
+<meta property="og:type" content="{ogtype}">
+<meta property="og:title" content="{title}">
+<meta property="og:description" content="{desc}">
+<meta property="og:url" content="{url}">
+<meta property="og:image" content="{image}">
+<meta property="og:locale" content="zh_CN">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="canonical" href="{url}">
+"""
+
+
+def schema_tag(kind: str, data) -> str:
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return (
+        f'<script type="application/ld+json" data-schema="{kind}">'
+        f"{payload}</script>"
+    )
+
+
+def add_head_metadata(s: str, feed_href: str, schema_kind: str = "", schema_data=None) -> str:
+    """幂等补 RSS 自动发现和页面结构化数据。"""
+    if 'type="application/rss+xml"' not in s:
+        feed = (
+            f'<link rel="alternate" type="application/rss+xml" '
+            f'title="半亩方塘 · 重温百部名著" href="{feed_href}">'
+        )
+        s = s.replace("</head>", feed + "\n</head>", 1)
+
+    if schema_kind and schema_data is not None:
+        marker = f'data-schema="{schema_kind}"'
+        tag = schema_tag(schema_kind, schema_data)
+        pattern = re.compile(
+            rf'<script type="application/ld\+json" {re.escape(marker)}>.*?</script>',
+            flags=re.S,
+        )
+        if pattern.search(s):
+            s = pattern.sub(tag, s, count=1)
+        else:
+            s = s.replace("</head>", tag + "\n</head>", 1)
+    return s
+
+PAGER_CSS = """
+  article h2.section{font-size:23px;line-height:1.5;font-weight:500;margin:52px 0 18px;
+    padding-top:20px;border-top:1px solid var(--line);letter-spacing:.01em}
+  article p.aside{margin:30px 0;padding:19px 22px;border-left:2px solid var(--seal);
+    background:rgba(155,50,39,.045);color:var(--ink);font-size:18px!important;line-height:1.8}
+  .article-toc{margin:0 0 34px;padding:14px 0 16px;border-top:1px solid var(--line);
+    border-bottom:1px solid var(--line)}
+  .article-toc strong{display:block;margin:0 0 6px;color:var(--ink-3);
+    font-size:10px;font-weight:400;letter-spacing:.2em}
+  .article-toc a{display:flex;align-items:center;min-height:40px;padding:6px 0;color:var(--ink-2);
+    font-size:14px;line-height:1.55;text-decoration:none;border-top:1px solid rgba(215,208,194,.62)}
+  .article-toc a.toc-sub{padding-left:18px;font-size:13px;color:var(--ink-3)}
+  .article-toc a:hover{color:var(--seal)}
+  .book-scene{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:28px;
+    align-items:center;margin:58px 0 8px;padding:26px 0;border-top:1px solid var(--line-dark);
+    border-bottom:1px solid var(--line)}
+  .book-scene img{display:block;width:100%;aspect-ratio:4/5;object-fit:cover;
+    filter:grayscale(.1) saturate(.84)}
+  .book-scene .scene-label{margin:0 0 10px;color:var(--ink-3);font-size:10px;
+    letter-spacing:.16em;line-height:1.6}
+  .book-scene blockquote{margin:0;color:var(--ink);font-size:18px;line-height:1.75}
+  .book-scene p.scene-note{margin:12px 0 18px;color:var(--ink-2);font-size:12px;line-height:1.8}
+  .book-scene a.scene-link{color:var(--seal);font-size:11px;letter-spacing:.08em;
+    text-decoration:none;border-bottom:1px solid var(--seal);padding-bottom:2px}
+  .pager{display:flex;justify-content:space-between;gap:24px;margin:56px 0 0;
+    padding-top:22px;border-top:1px solid var(--line);font-size:13px;letter-spacing:.06em}
+  .pager a{text-decoration:none;color:var(--ink-2);max-width:46%}
+  .pager a:hover{color:var(--seal)}
+  .pager .next{margin-left:auto;text-align:right}
+  @media (max-width:640px){
+    article h2.section{font-size:21px;margin-top:42px}
+    article p.aside{font-size:17px!important;padding:16px 18px}
+    .article-toc a{min-height:44px;padding-top:8px;padding-bottom:8px}
+    .article-toc a.toc-sub{padding-left:16px}
+    .book-scene{grid-template-columns:1fr;gap:18px}
+    .book-scene img{aspect-ratio:5/4}
+    .pager{flex-direction:column;gap:14px}.pager .next{margin-left:0;text-align:left}
+  }
+"""
+
+
+def improve_article_reading(s: str) -> str:
+    """给正文里本来就有的短标题补层级，并生成轻量目录。"""
+    m = re.search(r"(<article>)(.*?)(</article>)", s, flags=re.S)
+    if not m:
+        return s
+
+    tm = re.search(r"<h1>(.*?)</h1>", s, flags=re.S)
+    page_title = html.unescape(re.sub(r"<[^>]+>", "", tm.group(1))).strip() if tm else ""
+    headings = []
+
+    def repl(pm):
+        inner = pm.group(1).strip()
+        plain = html.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
+
+        if (
+            plain.rstrip("：:") == page_title
+            or re.fullmatch(r"第\s*\d+\s*期", plain)
+            or plain.startswith("半亩方塘 · 重温百部名著")
+            or re.fullmatch(r"《.+?》｜.+", plain)
+        ):
+            return pm.group(0)
+
+        if plain.startswith("★"):
+            text = html.escape(plain.lstrip("★").strip())
+            return f'<p class="aside"><span aria-hidden="true">◆ </span>{text}</p>'
+
+        if not plain or plain == "---" or re.search(r"[←→=×＝]", plain):
+            return pm.group(0)
+
+        ends_sentence = bool(re.search(r"[。！？；.!?;」』”）)]$", plain))
+        short_heading = len(plain) <= 22 and not ends_sentence
+        colon_heading = len(plain) <= 42 and plain.endswith(("：", ":"))
+        if short_heading or colon_heading:
+            headings.append(plain.rstrip("：:"))
+            sec_id = f"sec-{len(headings)}"
+            return f'<h2 class="section" id="{sec_id}">{html.escape(plain)}</h2>'
+        return pm.group(0)
+
+    body = re.sub(r"<p>(.*?)</p>", repl, m.group(2), flags=re.S)
+    if headings:
+        links = []
+        for i, label in enumerate(headings, 1):
+            sub = bool(re.match(r"^第[一二三四五六七八九十百]+(?:句|处|条)", label))
+            cls = ' class="toc-sub"' if sub else ""
+            links.append(
+                f'<a{cls} href="#sec-{i}">{html.escape(label)}</a>'
+            )
+        links = "".join(links)
+        toc = f'<nav class="article-toc" aria-label="本篇目录"><strong>本篇目录</strong>{links}</nav>'
+        body = toc + body
+
+    return s[:m.start(2)] + body + s[m.end(2):]
+
+
+def build_book_page(b: dict, books: list) -> None:
+    out_dir = ROOT / "books" / b["slug"]
+    out = out_dir / "index.html"
+    s = b["html"]
+
+    s = re.sub(r":root\{[^}]+\}", CSS_TOKENS, s, count=1)
+    s = s.replace('"Songti SC","Noto Serif CJK SC","STSong",serif', SERIF_STACK)
+    s = s.replace('"Songti SC","Noto Serif CJK SC",serif', SERIF_STACK)
+    s = re.sub(
+        rf'<footer><a href="\.\./index\.html">泉森 · 半亩方塘</a> · '
+        rf'<a href="mailto:{re.escape(CONTACT_EMAIL)}">[^<]+</a></footer>',
+        '<footer><a href="../index.html">泉森 · 半亩方塘</a> · '
+        '<a href="../about/index.html">关于</a></footer>',
+        s,
+        count=1,
+    )
+    s = improve_article_reading(s)
+
+    # 1) 相对路径上移一层：books/xx.html → books/xxx/index.html
+    s = re.sub(r'(href|src)="\.\./', r'\1="../../', s)
+
+    # 2) OG + canonical
+    url = f"{SITE}/books/{b['slug']}/"
+    label = "序" if b["no"] == 0 else f"第 {b['no']} 期"
+    desc = f"{label} · 重温百部名著" if b["no"] else "半亩方塘 · 开卷"
+    og = OG_BLOCK.format(desc=desc, ogtype="article", title=f"{b['title']} · 半亩方塘",
+                         url=url, image=OG_IMAGE)
+    if "</head>" in s:
+        s = s.replace("</head>", og + "</head>", 1)
+    else:
+        s = s.replace("</style></head>", "</style>" + og + "</head>", 1)
+
+    author = BOOK_META.get(b["no"], ("泉森", ""))[0]
+    book_schema = {
+        "@context": "https://schema.org",
+        "@graph": [
+            {
+                "@type": "Article",
+                "headline": f"{label} · {b['title']}",
+                "description": desc,
+                "url": url,
+                "mainEntityOfPage": url,
+                "inLanguage": "zh-CN",
+                "author": {"@type": "Person", "name": "泉森"},
+                "publisher": {"@type": "Person", "name": "泉森"},
+                "about": {"@id": f"{url}#book"},
+            },
+            {
+                "@type": "Book",
+                "@id": f"{url}#book",
+                "name": b["title"],
+                "author": {"@type": "Person", "name": author},
+            },
+        ],
+    }
+    s = add_head_metadata(s, "../../feed.xml", "book-article", book_schema)
+
+    # 3) 翻页样式
+    if "</style>" in s:
+        s = s.replace("</style>", PAGER_CSS + ARTICLE_NAV_CSS + "</style>", 1)
+
+    # 统一正文页导航：进入任一篇文章后仍可直接去阅读、影像和关于。
+    s = re.sub(
+        r'<header>\s*<span class="mark">半亩方塘</span>\s*'
+        r'<a href="(?:\.\./)+index\.html">回到首页</a>\s*</header>',
+        '<header><a class="mark" href="../../index.html">半亩方塘</a>'
+        '<nav aria-label="主导航"><a href="../../books/index.html" aria-current="page">阅读</a>'
+        '<a href="../../photos/index.html">影像</a>'
+        '<a href="../../about/index.html">关于</a></nav></header>',
+        s,
+        count=1,
+    )
+
+    # 4) 上一期 / 下一期
+    idx = books.index(b)
+    prev_b = books[idx - 1] if idx > 0 else None
+    next_b = books[idx + 1] if idx + 1 < len(books) else None
+    links = []
+    if prev_b:
+        lbl = "序" if prev_b["no"] == 0 else f"第 {prev_b['no']} 期"
+        links.append(f'<a href="../{prev_b["slug"]}/">← {lbl} · {html.escape(prev_b["title"])}</a>')
+    else:
+        links.append('<a href="../">← 全部目录</a>')
+    if next_b:
+        lbl = f"第 {next_b['no']} 期"
+        links.append(f'<a class="next" href="../{next_b["slug"]}/">{lbl} · {html.escape(next_b["title"])} →</a>')
+    else:
+        links.append('<a class="next" href="../">全部目录 →</a>')
+    pager = '<nav class="pager">' + "".join(links) + "</nav>"
+
+    if "</article>" in s:
+        scene = BOOK_SCENES.get(b["no"])
+        if scene:
+            slug, year, image, caption = scene
+            scene_block = f"""<aside class="book-scene" aria-label="书边影像">
+  <a href="../../photos/{slug}/"><img src="../../img/countries/{image}" alt="{html.escape(caption)}" width="800" height="1000" loading="lazy" decoding="async"></a>
+  <div>
+    <p class="scene-label">书边影像 · {year} · {slug.split('-')[0].title()}</p>
+    <blockquote>{html.escape(caption)}</blockquote>
+    <p class="scene-note">照片不为这一期作注，只在书页合上以后，留一块外景。</p>
+    <a class="scene-link" href="../../photos/{slug}/">走进这组影像 →</a>
+  </div>
+</aside>"""
+            s = s.replace("</article>", scene_block + "\n</article>", 1)
+        s = s.replace("</article>", "</article>\n" + pager, 1)
+    else:
+        s = s.replace("<footer", pager + "\n<footer", 1)
+
+    write(out, s)
+
+
+def build_legacy_redirect(b: dict) -> None:
+    """books/31.html → 兼容页，跳到 books/031/"""
+    target = f"{b['slug']}/"
+    page = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>{html.escape(b['title'])} · 半亩方塘</title>
+<link rel="canonical" href="{SITE}/books/{b['slug']}/">
+<meta http-equiv="refresh" content="0; url={target}">
+<meta name="robots" content="noindex,follow">
+<style>body{{margin:0;padding:72px 24px;background:#fbfaf7;color:#1f1f1f;
+font-family:"Songti SC","Noto Serif CJK SC",serif;line-height:1.9;text-align:center}}
+a{{color:#a63a2c}}</style>
+</head>
+<body><p>这一期已迁至新地址：<a href="{target}">第 {b['no']} 期 · {html.escape(b['title'])}</a></p></body>
+</html>
+"""
+    write(b["path"], page)
+
+
+# 编刊轴用的书目信息。只在目录页显示，不改正文。
+BOOK_META = {
+    0: ("泉森", "一百部书，一百个夜晚的来由。"),
+    1: ("维克多·弗兰克尔", "人在一无所有时，还能守住什么。"),
+    2: ("尤瓦尔·赫拉利", "人如何靠共同想象组织成社会。"),
+    3: ("菲利普·津巴多", "人怎样被说服，又怎样改变自己。"),
+    4: ("钱锺书", "婚姻与人生的进与出。"),
+    5: ("加西亚·马尔克斯", "一个家族在时间里的盛衰与孤独。"),
+    6: ("余华", "一个人怎样承受命运，继续活下去。"),
+    7: ("路遥", "普通人在时代里挣得自己的生活。"),
+    8: ("海明威", "人可以被毁掉，但不能被打败。"),
+    9: ("杨绛", "一家三口相守与失散的记忆。"),
+    10: ("斯蒂芬·金", "在封闭系统里保存自由和希望。"),
+    11: ("简·奥斯汀", "判断如何被偏见遮蔽，又如何被理解修正。"),
+    12: ("玛格丽特·米切尔", "一个女人在崩塌世界里重建生活。"),
+    13: ("陈忠实", "家族、土地和时代变迁。"),
+    14: ("阿尔贝·加缪", "一个人在荒诞世界里的真实与疏离。"),
+    15: ("沈从文", "温柔山水里的人情与命运。"),
+    16: ("艾米莉·勃朗特", "爱与复仇如何越过一代。"),
+    17: ("茅盾", "资本、城市和中国社会转型的截面。"),
+    18: ("艾萨克·阿西莫夫", "机器人三定律的边界与漏洞。"),
+    19: ("刘震云", "人一生都在寻找能说得上话的人。"),
+    20: ("马可·奥勒留", "如何在不可控的世界里安顿自己。"),
+    21: ("大仲马", "冤屈、等待、复仇与宽恕。"),
+    22: ("老舍", "一个普通人被现实一点点碾碎。"),
+    23: ("司汤达", "野心、阶层与爱情。"),
+    24: ("阿来", "土司制度衰亡中的一个“傻子”视角。"),
+    25: ("王小波", "在荒诞时代保存坦荡与自由。"),
+    26: ("东野圭吾", "两段人生在黑暗里彼此照亮又彼此代价。"),
+    27: ("埃里希·玛丽亚·雷马克", "战争如何摧毁一代年轻人。"),
+    28: ("龙应台", "如何陪一个孩子按自己的速度长大。"),
+    29: ("北野武", "母亲与儿子迟到又笨拙的和解。"),
+    30: ("博胡米尔·赫拉巴尔", "一个人在废纸堆里守住自己的世界。"),
+    31: ("八木仁平", "找到那件不由自主就会做的事。"),
+    32: ("鲁迅", "圣人先是一个人，然后才是圣人。"),
+    33: ("考琳·麦卡洛", "最美好的东西，只能用深痛巨创去换。"),
+    34: ("刘慈欣", "父亲在批斗台上，女儿在红岸按下了发射键。"),
+    35: ("陀思妥耶夫斯基", "一桩谋杀之后塌掉的，不是良心，是逻辑。"),
+    36: ("王小波", "一只不肯被安排的猪，和思维的乐趣。"),
+    37: ("詹姆斯·乔伊斯", "十五个顿悟，一场落在所有人身上的雪。"),
+    38: ("三毛", "白手成家、结婚记、哑奴：沙漠里的日子。"),
+    39: ("村上春树", "下到井底，把两个人放到同一个高度上。"),
+    40: ("苏童", "青石板缝里的血，和少年胳膊上的刺青。"),
+    41: ("菲茨杰拉德", "绿灯在对岸，账单在身后。"),
+}
+
+# “一期一景”：从现有影像档案里给部分札记配一块书边外景。
+# 照片不负责解释书，只提供读完之后另一种观看的尺度。
+BOOK_SCENES = {
+    0: ("norway-2015", "2015", "norway-03.jpg", "峡湾边的暮色与灯火"),
+    8: ("peru-2026", "2026", "peru-03.jpg", "岩壁上的印加燕鸥"),
+    10: ("norway-2015", "2015", "norway-01.jpg", "通往海边的路"),
+    18: ("kenya-2017", "2017", "kenya-03.jpg", "掠过水面的火烈鸟"),
+    20: ("norway-2015", "2015", "norway-02.jpg", "临水而立的旧木屋"),
+    25: ("peru-2026", "2026", "peru-02.jpg", "浅水中觅食的火烈鸟"),
+    26: ("norway-2015", "2015", "norway-03.jpg", "天色将暗时的峡湾"),
+    27: ("kenya-2017", "2017", "kenya-02.jpg", "草原上的落日"),
+    29: ("colombia-2019", "2019", "colombia-01.jpg", "橙色钟形花前的蜂鸟"),
+    30: ("norway-2015", "2015", "norway-03.jpg", "暮色中的水边人家"),
+    31: ("peru-2026", "2026", "peru-01.jpg", "紫色花穗上的蜂鸟"),
+}
+
+
+def ensure_cover_variants(books: list) -> None:
+    """生成手机用 640px 封面；cwebp 不可用时保留原图回退。"""
+    if not shutil.which("cwebp"):
+        return
+    for b in books:
+        src = ROOT / "img" / "covers" / f'b{b["no"]:02d}.webp'
+        dst = ROOT / "img" / "covers" / f'b{b["no"]:02d}-{COVER_SMALL_WIDTH}.webp'
+        if not src.exists():
+            continue
+        if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+            continue
+        subprocess.run(
+            [
+                "cwebp",
+                "-quiet",
+                "-resize",
+                str(COVER_SMALL_WIDTH),
+                "0",
+                str(src),
+                "-o",
+                str(dst),
+            ],
+            check=True,
+        )
+
+
+# ── 目录页 ───────────────────────────────────────────────────────────
+def build_books_index(books: list) -> None:
+    ensure_cover_variants(books)
+    published = len([b for b in books if b["no"] > 0])
+    groups = {}
+    for b in books:
+        # 序单独一组；01-10 → 0，11-20 → 1 ……
+        key = -1 if b["no"] == 0 else (b["no"] - 1) // 10
+        groups.setdefault(key, []).append(b)
+
+    def group_title(k):
+        if k == -1:
+            return "开卷"
+        lo, hi = k * 10 + 1, k * 10 + 10
+        return f"{lo:02d} — {hi:02d}"
+
+    parts = []
+    newest_no = max((b["no"] for b in books), default=0)
+    for k in sorted(groups, reverse=True):
+        parts.append(f'<h2 class="grp">{group_title(k)}</h2><div class="grid">')
+        for b in sorted(groups[k], key=lambda x: -x["no"]):
+            num = "序" if b["no"] == 0 else f'{b["no"]:02d}'
+            cover = ROOT / "img" / "covers" / f'b{b["no"]:02d}.webp'
+            cover_small = ROOT / "img" / "covers" / f'b{b["no"]:02d}-{COVER_SMALL_WIDTH}.webp'
+            title = html.escape(b["title"])
+            if cover.exists():
+                # 所有期统一走「成版封面」：图上已带三行抬头、书名、期号与同一枚朱红印
+                loading = "eager" if b["no"] == newest_no else "lazy"
+                responsive = ""
+                fallback = f'../img/covers/b{b["no"]:02d}.webp'
+                if cover_small.exists():
+                    responsive = (
+                        f' srcset="../img/covers/b{b["no"]:02d}.webp {COVER_WIDTH}w, '
+                        f'../img/covers/b{b["no"]:02d}-{COVER_SMALL_WIDTH}.webp '
+                        f'{COVER_SMALL_WIDTH}w"'
+                        ' sizes="(max-width:640px) calc(100vw - 40px), '
+                        '(max-width:1080px) calc((100vw - 96px) / 2), 516px"'
+                    )
+                    fallback = (
+                        f'../img/covers/b{b["no"]:02d}-{COVER_SMALL_WIDTH}.webp'
+                    )
+                parts.append(
+                    f'<a class="book-card baked" href="{b["slug"]}/">'
+                    f'<img class="cover" src="{fallback}"{responsive} '
+                    f'alt="{title}" width="{COVER_WIDTH}" height="{COVER_HEIGHT}" '
+                    f'loading="{loading}" decoding="async"></a>')
+            else:
+                parts.append(
+                    f'<a class="book-card plain" data-no="{num}" href="{b["slug"]}/">'
+                    f'<span class="no">{num}</span><h3>{title}</h3>'
+                    f'<img class="seal" src="../img/seal.svg" alt="半亩方塘"></a>')
+        parts.append('</div>')
+    listing = "\n".join(parts)
+
+    axis_rows = []
+    for b in sorted(books, key=lambda x: -x["no"]):
+        num = "00" if b["no"] == 0 else f'{b["no"]:02d}'
+        author, note = BOOK_META.get(
+            b["no"], ("泉森", "这篇札记还没有一句话摘要。"))
+        axis_rows.append(
+            f'<a class="axis-row" href="{b["slug"]}/">'
+            f'<span class="axis-no">{num}</span>'
+            f'<span class="axis-main"><strong>{html.escape(b["title"])}</strong>'
+            f'<em>{html.escape(author)}</em></span>'
+            f'<span class="axis-note">{html.escape(note)}</span>'
+            f'<span class="axis-arrow" aria-hidden="true">→</span></a>')
+    axis = "\n".join(axis_rows)
+
+    collection_schema = {
+        "@context": "https://schema.org",
+        "@type": "CollectionPage",
+        "name": "重温百部名著",
+        "url": f"{SITE}/books/",
+        "description": f"半亩方塘阅读札记，已读 {published} 期。",
+        "inLanguage": "zh-CN",
+        "isPartOf": {"@type": "WebSite", "name": "半亩方塘", "url": f"{SITE}/"},
+        "mainEntity": {
+            "@type": "ItemList",
+            "numberOfItems": len([b for b in books if b["no"] > 0]),
+            "itemListElement": [
+                {
+                    "@type": "ListItem",
+                    "position": i,
+                    "url": f"{SITE}/books/{b['slug']}/",
+                    "name": b["title"],
+                }
+                for i, b in enumerate(
+                    sorted((b for b in books if b["no"] > 0),
+                           key=lambda x: -x["no"]),
+                    1,
+                )
+            ],
+        },
+    }
+
+    page = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>重温百部名著 · 半亩方塘</title>
+{OG_BLOCK.format(desc=f"已读 {published} 期 · 一百部书，一百个夜晚。", ogtype="website",
+                title="重温百部名著 · 半亩方塘", url=f"{SITE}/books/", image=OG_IMAGE)}
+{schema_tag("books-collection", collection_schema)}
+<link rel="alternate" type="application/rss+xml" title="半亩方塘 · 重温百部名著" href="../feed.xml">
+<link rel="icon" type="image/png" sizes="32x32" href="../favicon-32.png">
+<style>
+{CSS_TOKENS}
+*{{box-sizing:border-box}}
+body{{margin:0;background:#f7f4ed;color:var(--ink);font-family:{SERIF_STACK};line-height:1.9}}
+.wrap{{width:min(calc(100% - 72px),1080px);margin:0 auto}}
+html{{-webkit-text-size-adjust:100%}}
+a:focus-visible{{outline:2px solid var(--seal);outline-offset:4px}}
+img{{display:block;max-width:100%}}
+header{{display:flex;justify-content:space-between;align-items:center;padding:28px 0 18px;border-bottom:1px solid var(--line)}}
+header a{{text-decoration:none}}
+header .mark{{color:var(--seal);font-size:22px;letter-spacing:.34em}}
+header nav{{display:flex;gap:28px;font-size:12px;letter-spacing:.18em}}
+header nav a{{display:inline-flex;align-items:center;justify-content:center;min-width:44px;min-height:44px;color:var(--ink-2)}}
+header nav a:hover,header nav a[aria-current="page"]{{color:var(--seal)}}
+.intro{{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:54px;align-items:end;padding:68px 0 46px}}
+.intro-kicker{{display:flex;align-items:center;gap:12px;margin:0 0 18px;color:var(--ink-3);font-size:11px;letter-spacing:.18em}}
+.intro-kicker::before{{content:"";width:32px;height:1px;background:var(--seal)}}
+h1{{font-size:clamp(36px,5vw,62px);font-weight:500;line-height:1.2;margin:0}}
+p.lede{{color:var(--ink-2);font-size:15px;margin:16px 0 0}}
+.progress{{font-size:11px;color:var(--ink-3);letter-spacing:.14em;margin:0;text-align:right}}
+.progress strong{{display:block;color:var(--ink);font-size:38px;font-weight:500;line-height:1.2;letter-spacing:0;margin-bottom:5px}}
+.bar{{height:2px;background:var(--line);margin:12px 0 0}}
+.bar i{{display:block;height:2px;background:var(--seal);width:{min(published,100)}%}}
+.view-input{{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}}
+.view-switch{{display:flex;gap:8px;padding:20px 0 28px;border-top:1px solid var(--line-dark)}}
+.view-switch label{{display:inline-flex;align-items:center;justify-content:center;min-height:44px;cursor:pointer;padding:7px 15px;border:1px solid var(--line);font-size:11px;letter-spacing:.14em;color:var(--ink-3);transition:.2s ease}}
+.view-switch label:hover{{border-color:var(--line-dark);color:var(--ink)}}
+#view-covers:checked ~ .view-switch label[for="view-covers"],
+#view-axis:checked ~ .view-switch label[for="view-axis"]{{background:var(--ink);border-color:var(--ink);color:var(--paper)}}
+.view-input:focus-visible ~ .view-switch label{{outline:2px solid var(--seal);outline-offset:3px}}
+#view-axis:checked ~ .views .covers{{display:none}}
+#view-covers:checked ~ .views .axis{{display:none}}
+h2.grp{{display:flex;align-items:center;gap:14px;font-size:11px;letter-spacing:.3em;color:var(--ink-3);font-weight:400;margin:42px 0 14px}}
+h2.grp::after{{content:"";height:1px;flex:1;background:var(--line)}}
+.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}}
+.book-card{{position:relative;display:block;aspect-ratio:2.35/1;overflow:hidden;
+  text-decoration:none;background:#f2efe6}}
+.book-card .cover{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+  transition:transform .5s ease}}
+.book-card:hover .cover{{transform:scale(1.025)}}
+.book-card::after{{content:"";position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(0,0,0,.18) 0%,rgba(0,0,0,.04) 38%,rgba(0,0,0,.62) 100%)}}
+.book-card.baked::after{{background:none}}
+.book-card.plain{{background:linear-gradient(135deg,#f4f1e8 0%,#efece2 100%)}}
+.book-card.plain::after{{background:none}}
+.book-card.plain::before{{content:attr(data-no);position:absolute;right:6px;top:-16px;
+  font-size:76px;line-height:1;font-weight:500;color:rgba(31,31,31,.06);letter-spacing:-.02em}}
+.book-card .no{{position:absolute;left:16px;top:13px;z-index:2;font-size:11px;
+  letter-spacing:.22em;color:#fff;opacity:.85}}
+.book-card h3{{position:absolute;left:16px;right:62px;bottom:14px;z-index:2;margin:0;
+  font-size:19px;line-height:1.35;font-weight:500;color:#fff;letter-spacing:.02em}}
+.book-card .seal{{position:absolute;right:13px;bottom:12px;z-index:2;width:36px;height:36px;opacity:.8}}
+.book-card.plain .no{{color:var(--ink-3);opacity:1}}
+.book-card.plain h3{{color:var(--ink)}}
+.book-card:hover h3{{color:var(--seal)}}
+.axis{{border-top:1px solid var(--line-dark)}}
+.axis-intro{{display:grid;grid-template-columns:160px 1fr;gap:32px;padding:24px 0 34px}}
+.axis-intro h2{{margin:0;font-size:23px;font-weight:500}}
+.axis-intro p{{margin:0;max-width:38em;color:var(--ink-2);font-size:13px}}
+.axis-list{{display:grid;grid-template-columns:1fr 1fr;column-gap:54px}}
+.axis-row{{display:grid;grid-template-columns:36px minmax(115px,.75fr) minmax(0,1.25fr) 12px;gap:14px;align-items:baseline;padding:15px 0;border-top:1px solid var(--line);text-decoration:none}}
+.axis-no{{font-size:10px;letter-spacing:.1em;color:var(--ink-3)}}
+.axis-main strong{{display:block;font-size:15px;line-height:1.55;font-weight:500}}
+.axis-main em{{display:block;margin-top:1px;color:var(--ink-3);font-size:10px;font-style:normal;letter-spacing:.05em;line-height:1.55}}
+.axis-note{{color:var(--ink-2);font-size:11px;line-height:1.7}}
+.axis-arrow{{color:var(--ink-3);font-size:11px;transition:transform .2s ease}}
+.axis-row:hover .axis-main strong,.axis-row:hover .axis-arrow{{color:var(--seal)}}
+.axis-row:hover .axis-arrow{{transform:translateX(3px)}}
+footer{{display:flex;justify-content:space-between;gap:20px;margin:64px 0 70px;padding-top:22px;border-top:1px solid var(--line);font-size:12px;color:var(--ink-3);letter-spacing:.08em}}
+footer a{{text-decoration:none;border-bottom:1px solid var(--line)}}
+@media (max-width:640px){{
+  .wrap{{width:calc(100% - 40px)}}
+  header nav{{gap:14px;letter-spacing:.08em}}
+  header nav a{{font-size:12px}}
+  header .mark{{font-size:19px;letter-spacing:.24em}}
+  .intro{{grid-template-columns:1fr;gap:24px;padding:48px 0 34px}}
+  .progress{{text-align:left}}
+  .progress strong{{display:inline;font-size:13px;margin-right:8px}}
+  .axis-intro{{grid-template-columns:1fr;gap:10px}}
+  .axis-list{{grid-template-columns:1fr}}
+  .axis-row{{grid-template-columns:32px 1fr 12px;gap:10px}}
+  .axis-note{{grid-column:2/4;margin-top:-8px}}
+  .axis-note{{font-size:12px;line-height:1.75}}
+  .axis-main em,.axis-no{{font-size:11px}}
+  .grid{{grid-template-columns:1fr}}
+  .book-card h3{{font-size:17px;right:54px}}
+  .book-card .seal{{width:32px;height:32px}}
+  footer{{flex-direction:column;gap:8px}}
+  footer a{{display:inline-flex;align-items:center;min-height:44px}}
+}}
+</style></head><body><div class="wrap">
+<header>
+  <a class="mark" href="../index.html">半亩方塘</a>
+  <nav aria-label="主导航"><a href="index.html" aria-current="page">阅读</a><a href="../photos/index.html">影像</a><a href="../about/index.html">关于</a></nav>
+</header>
+<section class="intro">
+  <div>
+    <p class="intro-kicker">阅读札记</p>
+    <h1>重温百部名著</h1>
+    <p class="lede">一百部书，一百个夜晚。封面是读过的书，编刊轴是走过的路。</p>
+  </div>
+  <div>
+    <p class="progress"><strong>{published} / 100</strong>已读 · 持续编刊中</p>
+    <div class="bar"><i></i></div>
+  </div>
+</section>
+<input class="view-input" type="radio" name="book-view" id="view-covers" checked>
+<input class="view-input" type="radio" name="book-view" id="view-axis">
+<div class="view-switch">
+  <label for="view-covers">封面墙</label>
+  <label for="view-axis">编刊轴</label>
+</div>
+<div class="views">
+  <section class="covers" aria-label="封面墙">{listing}</section>
+  <section class="axis" aria-labelledby="axis-title">
+    <div class="axis-intro">
+      <h2 id="axis-title">编刊轴</h2>
+      <p>按刊期回看。每一条不是书评摘要，而是这一期留下的一个念头；{published} 期连在一起，才像一条真正走过的阅读线索。</p>
+    </div>
+    <div class="axis-list">{axis}</div>
+  </section>
+</div>
+<footer><a href="../index.html">泉森 · 半亩方塘</a><span><a href="../feed.xml">RSS</a> · <a href="../about/index.html">关于</a></span></footer>
+</div></body></html>
+"""
+    write(ROOT / "books" / "index.html", page)
+
+
+# ── 国家相册 ─────────────────────────────────────────────────────────
+def photo_page(c: dict, prev_c, next_c) -> str:
+    figs = []
+    for fn, cap, ratio in c["photos"]:
+        stem = fn.rsplit(".", 1)[0]
+        width, height = (800, 1000) if ratio == "tall" else (1200, 800)
+        # 两档：800w / 1600w（图未生成时浏览器回落原图）
+        srcset = (f'../../img/countries/w800/{stem}.webp 800w, '
+                  f'../../img/countries/w1600/{stem}.webp 1600w')
+        figs.append(f"""      <figure class="{ratio}">
+        <a href="../../img/countries/{fn}" target="_blank" rel="noopener">
+          <img loading="lazy" src="../../img/countries/{fn}"
+               srcset="{srcset}" sizes="(max-width:820px) 92vw, 720px"
+               width="{width}" height="{height}"
+               alt="{html.escape(cap)}">
+        </a>
+        <figcaption>{html.escape(cap)}</figcaption>
+      </figure>""")
+    gallery = "\n".join(figs)
+
+    nav = []
+    if prev_c:
+        nav.append(f'<a href="../{prev_c["slug"]}/">← {prev_c["year"]} · {prev_c["name"]}</a>')
+    else:
+        nav.append('<a href="../">全部国家影像</a>')
+    if next_c:
+        nav.append(f'<a class="next" href="../{next_c["slug"]}/">{next_c["year"]} · {next_c["name"]} →</a>')
+    else:
+        nav.append('<a class="next" href="../">全部国家影像 →</a>')
+
+    url = f"{SITE}/photos/{c['slug']}/"
+    gallery_schema = {
+        "@context": "https://schema.org",
+        "@type": "ImageGallery",
+        "name": f"{c['name']} · {c['year']}",
+        "description": c["lead"],
+        "url": url,
+        "inLanguage": "zh-CN",
+        "author": {"@type": "Person", "name": "泉森"},
+        "image": [f"{SITE}/img/countries/{fn}" for fn, _, _ in c["photos"]],
+    }
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{OG_BLOCK.format(desc=c["lead"], ogtype="article", title=f'{c["name"]} · {c["year"]} · 半亩方塘', url=url, image=f"{SITE}/img/countries/{c['photos'][0][0]}")}
+{schema_tag("photo-gallery", gallery_schema)}
+<link rel="alternate" type="application/rss+xml" title="半亩方塘 · 重温百部名著" href="../../feed.xml">
+<link rel="icon" type="image/png" sizes="32x32" href="../../favicon-32.png">
+<style>
+{CSS_TOKENS}
+*{{box-sizing:border-box}}
+body{{margin:0;background:var(--paper);color:var(--ink);font-family:{SERIF_STACK};line-height:1.9}}
+.wrap{{max-width:860px;margin:0 auto;padding:0 26px}}
+html{{-webkit-text-size-adjust:100%}}
+a:focus-visible{{outline:2px solid var(--seal);outline-offset:4px}}
+header{{display:flex;justify-content:space-between;align-items:center;padding:24px 0 12px;border-bottom:1px solid var(--line);font-size:13px;letter-spacing:.2em}}
+header a{{text-decoration:none;color:var(--ink-2)}}
+header a:hover{{color:var(--seal)}}
+header .mark{{color:var(--seal)}}
+header nav{{display:flex;gap:26px}}
+header nav a{{display:inline-flex;align-items:center;min-height:44px}}
+header nav a[aria-current="page"]{{color:var(--ink)}}
+.intro{{padding:54px 0 34px;border-bottom:1px solid var(--line)}}
+.year{{font-size:12px;letter-spacing:.24em;color:var(--ink-3);margin:0 0 8px}}
+h1{{font-size:clamp(30px,4.6vw,46px);font-weight:500;margin:0 0 14px;line-height:1.25}}
+.intro p{{font-size:15px;color:var(--ink-2);margin:0;max-width:32em}}
+.gallery{{padding:44px 0 10px}}
+figure{{margin:0 0 46px}}
+figure img{{display:block;width:100%;height:auto;filter:grayscale(.12)}}
+figure.tall img{{aspect-ratio:4/5;object-fit:cover}}
+figure.wide img{{aspect-ratio:3/2;object-fit:cover}}
+figcaption{{font-size:12px;color:var(--ink-3);letter-spacing:.06em;margin-top:10px}}
+.pager{{display:flex;justify-content:space-between;gap:24px;padding:22px 0 0;border-top:1px solid var(--line);font-size:13px}}
+.pager a{{display:inline-flex;align-items:center;min-height:44px;text-decoration:none;color:var(--ink-2)}}
+.pager a:hover{{color:var(--seal)}}
+.pager .next{{margin-left:auto}}
+footer{{margin:56px 0 70px;font-size:12px;color:var(--ink-3);letter-spacing:.08em}}
+footer a{{text-decoration:none;border-bottom:1px solid var(--line)}}
+@media (max-width:820px){{
+  .wrap{{padding:0 20px}}
+  header nav{{gap:12px;letter-spacing:.1em}}
+  figure.tall img,figure.wide img{{aspect-ratio:auto}}
+  footer a{{display:inline-flex;align-items:center;min-height:44px}}
+}}
+</style></head>
+<body><div class="wrap">
+<header>
+  <a class="mark" href="../../index.html">半亩方塘</a>
+  <nav aria-label="主导航"><a href="../../books/index.html">阅读</a><a href="../" aria-current="page">影像</a><a href="../../about/index.html">关于</a></nav>
+</header>
+<div class="intro">
+  <p class="year">{c["year"]}</p>
+  <h1>{c["name"]}</h1>
+  <p>{c["lead"]}</p>
+</div>
+<div class="gallery">
+{gallery}
+</div>
+<nav class="pager">{"".join(nav)}</nav>
+<footer><a href="../../index.html">泉森 · 半亩方塘</a> · <a href="../">影像档案</a></footer>
+</div></body></html>
+"""
+
+
+def build_photo_pages() -> None:
+    for i, c in enumerate(COUNTRIES):
+        prev_c = COUNTRIES[i - 1] if i > 0 else None
+        next_c = COUNTRIES[i + 1] if i + 1 < len(COUNTRIES) else None
+        write(ROOT / "photos" / c["slug"] / "index.html", photo_page(c, prev_c, next_c))
+
+
+# ── 首页 / 影像索引：加 OG、链接指向新地址 ──────────────────────────
+def upgrade_static_pages(books: list) -> None:
+    idx = ROOT / "index.html"
+    s = idx.read_text(encoding="utf-8")
+    for b in books:
+        if b["no"] == 0:
+            continue
+        s = s.replace(f'href="books/{b["no"]}.html"', f'href="books/{b["slug"]}/"')
+    if "og:site_name" not in s:
+        og = OG_BLOCK.format(
+            desc="泉森的半亩方塘：一百部书的札记，按国家收拢的照片。",
+            ogtype="website", title="泉森 · 半亩方塘", url=f"{SITE}/", image=OG_IMAGE)
+        s = s.replace("</head>", og + "</head>", 1)
+    home_schema = {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "半亩方塘",
+        "alternateName": "泉森的阅读与影像",
+        "url": f"{SITE}/",
+        "description": "一百部书的阅读札记，四地的摄影影像。",
+        "inLanguage": "zh-CN",
+        "author": {"@type": "Person", "name": "泉森"},
+        "publisher": {"@type": "Person", "name": "泉森"},
+    }
+    s = add_head_metadata(s, "feed.xml", "home-website", home_schema)
+    s = s.replace(
+        '"Songti SC","Noto Serif CJK SC","Source Han Serif SC","STSong",serif',
+        f"{SERIF_STACK}",
+    )
+    idx.write_text(s, encoding="utf-8")
+    print(f"  ✓ {rel(idx)}（OG + 期号链接）")
+
+    ph = ROOT / "photos" / "index.html"
+    t = ph.read_text(encoding="utf-8")
+    for c in COUNTRIES:
+        t = re.sub(rf'href="\.\./img/countries/{c["key"]}-\d+\.jpg"',
+                   f'href="{c["slug"]}/"', t)
+    if "og:site_name" not in t:
+        og = OG_BLOCK.format(
+            desc="泉森的影像档案：按国家收录风光、建筑、街景与物种。",
+            ogtype="website", title="影像档案 · 半亩方塘",
+            url=f"{SITE}/photos/", image=OG_IMAGE)
+        t = t.replace("</head>", og + "</head>", 1)
+    photo_index_schema = {
+        "@context": "https://schema.org",
+        "@type": "ImageGallery",
+        "name": "影像档案",
+        "url": f"{SITE}/photos/",
+        "description": "泉森的影像档案：按国家收录风光、建筑、街景与物种。",
+        "inLanguage": "zh-CN",
+        "author": {"@type": "Person", "name": "泉森"},
+    }
+    t = add_head_metadata(t, "../feed.xml", "photos-gallery", photo_index_schema)
+    t = t.replace(
+        '"Songti SC","Noto Serif CJK SC","STSong",serif',
+        f"{SERIF_STACK}",
+    )
+    t = t.replace(
+        '"Songti SC","Noto Serif CJK SC","Source Han Serif SC","STSong",serif',
+        f"{SERIF_STACK}",
+    )
+    t = t.replace(
+        '"Songti SC","Noto Serif CJK SC",serif',
+        f"{SERIF_STACK}",
+    )
+    ph.write_text(t, encoding="utf-8")
+    print(f"  ✓ {rel(ph)}（OG + 相册入口）")
+
+
+# ── sitemap / 404 / 关于 ─────────────────────────────────────────────
+def build_sitemap(books: list) -> None:
+    urls = []
+
+    def add(loc: str, lastmod: str, priority="0.7", freq="monthly"):
+        urls.append(f"""  <url>
+    <loc>{loc}</loc>
+    <lastmod>{lastmod}</lastmod>
+    <changefreq>{freq}</changefreq>
+    <priority>{priority}</priority>
+  </url>""")
+
+    add(f"{SITE}/", mtime_iso(ROOT / "index.html"), "1.0")
+    add(f"{SITE}/books/", mtime_iso(ROOT / "books" / "index.html"), "0.9", "weekly")
+    for b in books:
+        p = ROOT / "books" / b["slug"] / "index.html"
+        add(f"{SITE}/books/{b['slug']}/", mtime_iso(p if p.exists() else b["path"]), "0.8")
+    add(f"{SITE}/photos/", mtime_iso(ROOT / "photos" / "index.html"), "0.9", "weekly")
+    for c in COUNTRIES:
+        p = ROOT / "photos" / c["slug"] / "index.html"
+        add(f"{SITE}/photos/{c['slug']}/", mtime_iso(p), "0.7")
+    about = ROOT / "about" / "index.html"
+    if about.exists():
+        add(f"{SITE}/about/", mtime_iso(about), "0.6", "yearly")
+
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+{chr(10).join(urls)}
+</urlset>
+"""
+    write(ROOT / "sitemap.xml", body)
+
+
+def build_feed(books: list) -> None:
+    """RSS 指向站内正文，不再跳到已经和本站脱节的旧公众号链接。"""
+    items = []
+    newest_ts = 0.0
+    for b in sorted(books, key=lambda x: -x["no"]):
+        if b["no"] == 0:
+            continue
+        ts = b["source"].stat().st_mtime
+        newest_ts = max(newest_ts, ts)
+        label = f'第 {b["no"]} 期'
+        url = f"{SITE}/books/{b['slug']}/"
+        items.append(f"""    <item>
+      <title>{html.escape(label)} · {html.escape(b["title"])}</title>
+      <link>{url}</link>
+      <guid isPermaLink="true">{url}</guid>
+      <pubDate>{format_datetime(datetime.fromtimestamp(ts, tz=TZ))}</pubDate>
+      <description>{html.escape(label)} · {html.escape(b["title"])}｜半亩方塘</description>
+    </item>""")
+
+    last_build = datetime.now(TZ)
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>半亩方塘 · 重温百部名著</title>
+    <link>{SITE}/books/</link>
+    <description>一百部书，一百个夜晚。读完一本，说几句话。</description>
+    <language>zh-cn</language>
+    <lastBuildDate>{format_datetime(last_build)}</lastBuildDate>
+{chr(10).join(items)}
+  </channel>
+</rss>
+"""
+    write(ROOT / "feed.xml", body)
+
+
+def build_404() -> None:
+    page = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>没有这一页 · 半亩方塘</title>
+<meta name="robots" content="noindex">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<style>
+{CSS_TOKENS}
+body{{margin:0;min-height:100vh;display:flex;align-items:center;background:var(--paper);color:var(--ink);
+font-family:{SERIF_STACK};line-height:1.95}}
+.wrap{{max-width:620px;margin:0 auto;padding:0 26px}}
+h1{{font-size:34px;font-weight:500;margin:0 0 16px}}
+p{{color:var(--ink-2);font-size:15px;margin:0 0 30px}}
+.links{{display:flex;gap:26px;font-size:13px;letter-spacing:.1em}}
+.links a{{color:var(--seal);text-decoration:none;border-bottom:1px solid var(--seal);padding-bottom:2px}}
+.mark{{color:var(--seal);font-size:13px;letter-spacing:.3em;margin-bottom:26px}}
+</style></head>
+<body><div class="wrap">
+<div class="mark">半亩方塘</div>
+<h1>这一页没有找到。</h1>
+<p>可能是地址写错了，也可能是它还没写出来。<br>不急着走，往回翻翻。</p>
+<div class="links">
+  <a href="/">回到首页</a>
+  <a href="/books/">去读书</a>
+  <a href="/photos/">去看照片</a>
+</div>
+</div></body></html>
+"""
+    write(ROOT / "404.html", page)
+
+
+def build_about_stub() -> None:
+    """关于页骨架：正文留空位，等老爷写。已存在则不覆盖。"""
+    out = ROOT / "about" / "index.html"
+    if out.exists():
+        print(f"  · {rel(out)} 已存在，跳过（不覆盖）")
+        return
+    page = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>关于 · 半亩方塘</title>
+{OG_BLOCK.format(desc="关于半亩方塘，以及写这些字、拍这些照片的人。", ogtype="website",
+                title="关于 · 半亩方塘", url=f"{SITE}/about/", image=OG_IMAGE)}
+<link rel="alternate" type="application/rss+xml" title="半亩方塘 · 重温百部名著" href="../feed.xml">
+{schema_tag("about-person", {
+    "@context": "https://schema.org",
+    "@type": "Person",
+    "name": "泉森",
+    "url": f"{SITE}/about/",
+    "description": "半亩方塘的作者与摄影者。",
+    "knowsAbout": ["阅读札记", "摄影"],
+})}
+<link rel="icon" type="image/png" sizes="32x32" href="../favicon-32.png">
+<style>
+{CSS_TOKENS}
+body{{margin:0;background:var(--paper);color:var(--ink);font-family:{SERIF_STACK};line-height:1.95}}
+.wrap{{max-width:680px;margin:0 auto;padding:0 26px}}
+header{{display:flex;justify-content:space-between;align-items:baseline;padding:34px 0 18px;border-bottom:1px solid var(--line)}}
+.mark{{font-size:20px;letter-spacing:.3em;color:var(--seal)}}
+header a{{text-decoration:none;font-size:13px;letter-spacing:.2em;color:var(--ink-2)}}
+h1{{font-size:clamp(28px,4vw,40px);font-weight:500;margin:64px 0 34px;line-height:1.3}}
+section{{margin:0 0 40px}}
+h2{{font-size:12px;letter-spacing:.36em;color:var(--ink-3);font-weight:400;margin:0 0 14px}}
+p{{font-size:16px;color:var(--ink-2);margin:0 0 14px;max-width:30em}}
+.seal{{margin:52px 0 0}}
+.seal img{{width:92px;height:92px}}
+footer{{margin:70px 0 80px;padding-top:22px;border-top:1px solid var(--line);font-size:12px;color:var(--ink-3);letter-spacing:.08em}}
+footer a{{text-decoration:none;border-bottom:1px solid var(--line)}}
+</style></head>
+<body><div class="wrap">
+<header><span class="mark">半亩方塘</span><a href="../index.html">回到首页</a></header>
+<h1>关于这半亩方塘</h1>
+<section>
+  <h2>我是谁</h2>
+  <p>（待写。两三句就够，不必交代履历。）</p>
+</section>
+<section>
+  <h2>为什么读</h2>
+  <p>（待写。）</p>
+</section>
+<section>
+  <h2>为什么拍</h2>
+  <p>（待写。）</p>
+</section>
+<section>
+  <h2>联系</h2>
+  <p><a href="mailto:{CONTACT_EMAIL}">{CONTACT_EMAIL}</a>　·　<a href="../feed.xml">RSS 订阅</a></p>
+</section>
+<div class="seal"><img src="../img/seal.svg" alt="半亩方塘"></div>
+<footer><a href="../index.html">泉森 · 半亩方塘</a></footer>
+</div></body></html>
+"""
+    write(out, page)
+
+
+def sync_about_latest(books: list) -> None:
+    """关于页的“最新一期”跟随书目自动更新。"""
+    out = ROOT / "about" / "index.html"
+    latest = max((b for b in books if b["no"] > 0), key=lambda b: b["no"])
+    _, note = BOOK_META.get(latest["no"], ("泉森", "刚写完的一期。"))
+    text = out.read_text(encoding="utf-8")
+    replacement = (
+        f'<a href="../books/{latest["slug"]}/"><span>最新一期</span>'
+        f'<strong>{html.escape(latest["title"])}</strong>'
+        f'<small>{html.escape(note)}</small></a>'
+    )
+    updated, count = re.subn(
+        r'<a href="\.\./books/\d{3}/"><span>最新一期</span>'
+        r'<strong>.*?</strong><small>.*?</small></a>',
+        replacement,
+        text,
+        count=1,
+        flags=re.S,
+    )
+    if count:
+        out.write_text(updated, encoding="utf-8")
+        print(f"  ✓ {rel(out)} 最新一期 → 第 {latest['no']} 期")
+
+
+# ── 主流程 ───────────────────────────────────────────────────────────
+def image_metadata(path: Path) -> str:
+    result = subprocess.run(
+        ["exiftool", "-q", "-s", *METADATA_ARGS, str(path)],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def bake_orientation(path: Path) -> None:
+    """先按 EXIF 旋转烘焙进像素，避免清元数据后手机照片变横。"""
+    orientation = subprocess.run(
+        ["exiftool", "-q", "-s3", "-Orientation#", str(path)],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if not orientation or orientation == "1":
+        return
+    if not shutil.which("magick"):
+        raise SystemExit(f"!! {rel(path)} 需要旋转，但没装 ImageMagick，构建中止")
+    tmp = path.with_name(f".{path.stem}.dqquan-tmp{path.suffix}")
+    try:
+        result = subprocess.run(
+            [
+                "magick", str(path), "-auto-orient", "-colorspace", "sRGB",
+                "-strip", str(tmp),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            raise SystemExit(f"!! {rel(path)} 自动旋转失败：{result.stderr.strip()[:300]}")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def strip_img_metadata() -> None:
+    """发布前必做：剥掉所有图片里的身份与拍摄元数据。
+
+    机身序列号 + 精确到秒的拍摄时间能串联散落照片，也能与公开行程互相印证。
+    JPEG/PNG/WebP 等统一真剥；剥完再验，仍有残留就中止构建。
+    """
+    targets = [
+        q for d in (ROOT / "img", ROOT / "photos") if d.exists()
+        for q in d.rglob("*")
+        if q.is_file() and q.suffix.lower() in IMAGE_SUFFIXES
+    ]
+    if not targets:
+        return
+    if not shutil.which("exiftool"):
+        raise SystemExit("!! 没装 exiftool，没法剥图片元数据 —— 构建中止（别带着 EXIF 发布）")
+
+    dirty = [q for q in targets if image_metadata(q)]
+    if dirty:
+        print(f"  · 剥元数据：{len(dirty)} 张（EXIF/XMP/IPTC/GPS/机身信息）")
+        for q in dirty:
+            bake_orientation(q)
+        result = subprocess.run(
+            [
+                "exiftool", "-q", "-overwrite_original", "-all=",
+                "-tagsfromfile", "@", "-ColorSpaceTags", *map(str, dirty),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            raise SystemExit(f"!! 图片元数据清理失败：{result.stderr.strip()[:300]}")
+        remaining = [str(q) for q in dirty if image_metadata(q)]
+        if remaining:
+            raise SystemExit("!! 图片元数据仍有残留：" + "、".join(remaining[:8]))
+    else:
+        print(f"  · 图片元数据：{len(targets)} 张已干净")
+
+
+def audit_public_surface() -> None:
+    """发布前检查公开网页里不应出现的身份线索。"""
+    html_files = [
+        p for p in ROOT.rglob("*.html")
+        if ".git" not in p.parts and "node_modules" not in p.parts
+    ]
+    problems = []
+    email_re = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
+    phone_re = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+    id_re = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
+    travel_date_re = re.compile(r"(?:20\d{2}\.\d{2}\.\d{2}|\d{1,2}\s*月\s*\d{1,2}\s*日)")
+
+    for p in html_files:
+        rel_path = rel(p)
+        text = p.read_text(encoding="utf-8", errors="ignore")
+        emails = sorted(set(email_re.findall(text)))
+        if emails and rel_path != "about/index.html":
+            problems.append(f"{rel_path} 仍有公开邮箱：{', '.join(emails)}")
+        for term in PRIVATE_TERMS:
+            if term in text:
+                problems.append(f"{rel_path} 出现敏感身份词：{term}")
+        if phone_re.search(text):
+            problems.append(f"{rel_path} 出现手机号样式的数字")
+        if id_re.search(text):
+            problems.append(f"{rel_path} 出现身份证号样式的数字")
+        if rel_path.startswith("travel/") and travel_date_re.search(text):
+            problems.append(f"{rel_path} 仍有精确旅行日期，改为月份或相对时间")
+
+    author = subprocess.run(
+        ["git", "log", "-1", "--format=%ae"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if author and not author.endswith("@users.noreply.github.com"):
+        problems.append(f"当前 Git 提交邮箱不是 GitHub noreply：{author}")
+
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True,
+    ).stdout.splitlines()
+    blocked_files = [
+        name for name in tracked
+        if name == ".DS_Store"
+        or name.endswith((".NEF", ".NRW", ".ARW", ".CR2", ".CR3", ".RAF", ".ORF"))
+        or name.startswith((".env", "secrets/"))
+    ]
+    if blocked_files:
+        problems.append("版本库含源片/密钥类文件：" + "、".join(blocked_files[:8]))
+
+    if problems:
+        print("\n[隐私审计] 未通过：")
+        for item in problems:
+            print(f"  ✗ {item}")
+        raise SystemExit(1)
+    print(f"  · 隐私审计：{len(html_files)} 个页面、{len(PRIVATE_TERMS)} 类职务词均通过")
+
+
+def main():
+    what = sys.argv[1] if len(sys.argv) > 1 else "all"
+    print("[公开面] 收口联系方式")
+    scrub_public_emails()
+    books = load_books()
+    print(f"读到 {len(books)} 个书页（含序）")
+    print("\n[体检] 图片元数据（EXIF/GPS）")
+    strip_img_metadata()
+
+    if what in ("all", "books"):
+        print("\n[书页] 三位期号 + OG + 翻页")
+        for b in books:
+            build_book_page(b, books)
+        print("\n[书页] 旧链接兼容页")
+        for b in books:
+            build_legacy_redirect(b)
+        print("\n[目录] 分组 + 进度")
+        build_books_index(books)
+
+    if what in ("all", "404"):
+        print("\n[404]")
+        build_404()
+        print("\n[关于] 骨架（不覆盖已有）")
+        build_about_stub()
+
+    if what in ("all", "books", "404"):
+        print("\n[关于] 最新一期")
+        sync_about_latest(books)
+
+    if what in ("all", "photos"):
+        print("\n[相册] 四个国家页")
+        build_photo_pages()
+
+    if what in ("all", "static"):
+        print("\n[静态页] 首页 / 影像索引")
+        upgrade_static_pages(books)
+
+    if what in ("all", "sitemap"):
+        print("\n[sitemap] 全量")
+        build_sitemap(books)
+
+    if what in ("all", "feed"):
+        print("\n[RSS] 站内正文")
+        build_feed(books)
+
+    if what == "all":
+        print("\n[安全头] 静态页面")
+        harden_html_heads()
+
+    if what in ("all", "audit"):
+        print("\n[隐私审计] 公开页面")
+        audit_public_surface()
+
+    print("\n完成。")
+
+
+if __name__ == "__main__":
+    main()
