@@ -404,7 +404,7 @@ def build_book_page(b: dict, books: list) -> None:
         r'<a href="(?:\.\./)+index\.html">回到首页</a>\s*</header>',
         '<header><a class="mark" href="../../index.html">半亩方塘</a>'
         '<nav aria-label="主导航"><a href="../../books/index.html" aria-current="page">阅读</a>'
-        '<a href="../../photos/index.html">影像</a>'
+        '<a href="../../photos/index.html">足迹</a>'
         '<a href="../../about/index.html">关于</a></nav></header>',
         s,
         count=1,
@@ -759,7 +759,7 @@ footer a{{text-decoration:none;border-bottom:1px solid var(--line)}}
 </style></head><body><div class="wrap">
 <header>
   <a class="mark" href="../index.html">半亩方塘</a>
-  <nav aria-label="主导航"><a href="index.html" aria-current="page">阅读</a><a href="../photos/index.html">影像</a><a href="../about/index.html">关于</a></nav>
+  <nav aria-label="主导航"><a href="index.html" aria-current="page">阅读</a><a href="../photos/index.html">足迹</a><a href="../about/index.html">关于</a></nav>
 </header>
 <section class="intro">
   <div>
@@ -903,7 +903,7 @@ footer a{{text-decoration:none;border-bottom:1px solid var(--line)}}
 <body><div class="wrap">
 <header>
   <a class="mark" href="../../index.html">半亩方塘</a>
-  <nav aria-label="主导航"><a href="../../books/index.html">阅读</a><a href="../" aria-current="page">影像</a><a href="../../about/index.html">关于</a></nav>
+  <nav aria-label="主导航"><a href="../../books/index.html">阅读</a><a href="../" aria-current="page">足迹</a><a href="../../about/index.html">关于</a></nav>
 </header>
 <div class="intro">
   <p class="year">{c["year"]}</p>
