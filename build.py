@@ -351,6 +351,9 @@ def build_book_page(b: dict, books: list) -> None:
         count=1,
     )
     s = improve_article_reading(s)
+    if "<main" not in s:
+        s = re.sub(r"(<article\b)", r'<main id="main">\1', s, count=1)
+        s = s.replace("</article>", "</article>\n</main>", 1)
 
     # 1) 相对路径上移一层：books/xx.html → books/xxx/index.html
     s = re.sub(r'(href|src)="\.\./', r'\1="../../', s)
@@ -451,6 +454,7 @@ def build_legacy_redirect(b: dict) -> None:
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+{HARDENING_META}
 <meta charset="utf-8">
 <title>{html.escape(b['title'])} · 半亩方塘</title>
 <link rel="canonical" href="{SITE}/books/{b['slug']}/">
@@ -653,6 +657,7 @@ def build_books_index(books: list) -> None:
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+{HARDENING_META}
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>重温百部名著 · 半亩方塘</title>
@@ -833,6 +838,7 @@ def photo_page(c: dict, prev_c, next_c) -> str:
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+{HARDENING_META}
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {OG_BLOCK.format(desc=c["lead"], ogtype="article", title=f'{c["name"]} · {c["year"]} · 半亩方塘', url=url, image=f"{SITE}/img/countries/{c['photos'][0][0]}")}
@@ -859,7 +865,7 @@ h1{{font-size:clamp(30px,4.6vw,46px);font-weight:500;margin:0 0 14px;line-height
 .intro p{{font-size:15px;color:var(--ink-2);margin:0;max-width:32em}}
 .gallery{{padding:44px 0 10px}}
 figure{{margin:0 0 46px}}
-figure img{{display:block;width:100%;height:auto;filter:grayscale(.12)}}
+figure img{{display:block;width:100%;height:auto;filter:grayscale(.05)}}
 figure.tall img{{aspect-ratio:4/5;object-fit:cover}}
 figure.wide img{{aspect-ratio:3/2;object-fit:cover}}
 figcaption{{font-size:12px;color:var(--ink-3);letter-spacing:.06em;margin-top:10px}}
@@ -1019,12 +1025,13 @@ def build_sitemap(books: list) -> None:
 def build_feed(books: list) -> None:
     """RSS 指向站内正文，不再跳到已经和本站脱节的旧公众号链接。"""
     items = []
-    newest_ts = 0.0
+    newest_date = "1970-01-01"
     for b in sorted(books, key=lambda x: -x["no"]):
         if b["no"] == 0:
             continue
-        ts = b["source"].stat().st_mtime
-        newest_ts = max(newest_ts, ts)
+        date_text = git_lastmod(b["source"])
+        newest_date = max(newest_date, date_text)
+        ts = datetime.strptime(date_text, "%Y-%m-%d").replace(tzinfo=TZ).timestamp()
         label = f'第 {b["no"]} 期'
         url = f"{SITE}/books/{b['slug']}/"
         items.append(f"""    <item>
@@ -1035,7 +1042,7 @@ def build_feed(books: list) -> None:
       <description>{html.escape(label)} · {html.escape(b["title"])}｜半亩方塘</description>
     </item>""")
 
-    last_build = datetime.now(TZ)
+    last_build = datetime.strptime(newest_date, "%Y-%m-%d").replace(tzinfo=TZ)
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
@@ -1055,6 +1062,7 @@ def build_404() -> None:
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+{HARDENING_META}
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>没有这一页 · 半亩方塘</title>
@@ -1094,6 +1102,7 @@ def build_about_stub() -> None:
     page = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+{HARDENING_META}
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>关于 · 半亩方塘</title>

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-图片处理：把 img/countries/*.jpg 转成两档 WebP（800w / 1600w）
+图片处理：把 img/countries/*.jpg 转成四档 WebP（240w / 480w / 800w / 1600w）
 
 用法：
     python3 make_images.py            # 全部国家图
     python3 make_images.py --check    # 只看会产出什么，不写文件
 
 输出：
+    img/countries/w240/<stem>.webp
+    img/countries/w480/<stem>.webp
     img/countries/w800/<stem>.webp
     img/countries/w1600/<stem>.webp
 
@@ -20,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "img" / "countries"
-SIZES = [("w800", 800), ("w1600", 1600)]
+SIZES = [("w240", 240), ("w480", 480), ("w800", 800), ("w1600", 1600)]
 QUALITY = 82
 
 
