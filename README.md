@@ -4,7 +4,9 @@
 纯静态 HTML，GitHub Pages 托管，Cloudflare 代理。
 
 - 域名：https://dqquan.com
-- 仓库：`sarah-veil/dqquan-site`（main 分支根目录发布）
+- **正本仓库**：`sarah-veil/dqquan-site`（main 分支根目录发布）
+- 本机唯一工作副本：`/Users/apple/CodexProjects/dqquan_public`
+- 旧库 `dqquan_home` 只作历史备份，禁止构建、提交或发布。
 
 ---
 
