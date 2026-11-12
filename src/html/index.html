@@ -88,9 +88,17 @@
     max-width:21em;margin:24px 0 0;color:var(--ink-2);
     font-size:clamp(17px,1.65vw,21px);line-height:1.85;text-wrap:pretty;
   }
-  .hero-copy .positioning{
-    max-width:38em;margin:18px 0 0;color:var(--ink-3);
-    font-size:13px;line-height:1.8;letter-spacing:.1em;
+  .preface{
+    display:grid;grid-template-columns:140px minmax(0,34em);
+    gap:clamp(30px,5vw,64px);align-items:start;
+    padding:40px 0 44px;border-bottom:1px solid var(--line);
+  }
+  .preface-label{
+    margin:7px 0 0;color:var(--ink-3);font-size:11px;letter-spacing:.24em;
+  }
+  .preface-copy{
+    max-width:34em;margin:0;color:var(--ink-2);
+    font-size:clamp(15px,1.5vw,18px);line-height:1.9;text-wrap:pretty;
   }
   .read-link{
     display:inline-flex;align-items:center;gap:14px;margin-top:24px;
@@ -221,13 +229,15 @@
     to{opacity:1;transform:translateY(0)}
   }
   @media (prefers-reduced-motion:no-preference){
-    .hero-copy{animation:ink-settle .7s .05s both cubic-bezier(.16,1,.3,1)}
+    .preface,.hero-copy{animation:ink-settle .7s .05s both cubic-bezier(.16,1,.3,1)}
   }
 
   @media (max-width:900px){
     .wrap{width:min(calc(100% - 44px),var(--max))}
     .site-head{padding:26px 0 18px}
     .brand small{display:none}
+    .preface{grid-template-columns:1fr;gap:10px;padding:32px 0 36px}
+    .preface-label{margin:0}
     .opening{
       padding:54px 0 48px;
     }
@@ -296,12 +306,16 @@
 </header>
 
 <main id="main">
+  <section class="preface wrap" aria-labelledby="preface-label">
+    <p class="preface-label" id="preface-label">卷首语</p>
+    <p class="preface-copy">这是一份由阅读札记与摄影影像构成的个人刊物。文字向内，留下阅读的线索；影像向外，保存目光所及。它不追求热闹，只求在长期更新中保持准确与安静。</p>
+  </section>
+
   <section class="opening wrap" aria-labelledby="latest-title">
     <div class="hero-copy">
       <p class="issue-meta">第 41 期 · 阅读札记</p>
       <h1 id="latest-title">了不起的盖茨比</h1>
       <p class="deck">绿灯在对岸，账单在身后。</p>
-      <p class="positioning">这是一份由阅读札记与摄影影像构成的个人刊物。文字向内，留下阅读的线索；影像向外，保存目光所及。它不追求热闹，只求在长期更新中保持准确与安静。</p>
       <a class="read-link" href="books/041/">读这一期 <span aria-hidden="true">→</span></a>
     </div>
   </section>
