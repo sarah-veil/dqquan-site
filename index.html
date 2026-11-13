@@ -75,19 +75,33 @@
   .opening{
     padding:clamp(58px,8vh,84px) 0 clamp(46px,6vh,64px);
   }
+  .hero{
+    display:grid;grid-template-columns:minmax(0,1.05fr) minmax(320px,.95fr);
+    gap:clamp(44px,7vw,92px);align-items:center;
+  }
+  .hero:not(.has-cover){grid-template-columns:minmax(0,1fr)}
   .issue-meta{
     display:flex;align-items:center;gap:12px;
     margin:0 0 24px;color:var(--ink-3);font-size:12px;letter-spacing:.18em;
   }
   .issue-meta::before{content:"";width:32px;height:1px;background:var(--seal)}
   .hero-copy h1{
-    max-width:12em;margin:0;font-size:clamp(46px,6.2vw,80px);
+    max-width:12em;margin:0;font-size:clamp(42px,5.4vw,70px);
     font-weight:500;line-height:1.18;letter-spacing:.015em;text-wrap:balance;
   }
   .hero-copy .deck{
     max-width:21em;margin:24px 0 0;color:var(--ink-2);
     font-size:clamp(17px,1.65vw,21px);line-height:1.85;text-wrap:pretty;
   }
+  .hero-cover{
+    display:block;padding:10px;border:1px solid var(--line);
+    background:#fff;text-decoration:none;
+  }
+  .hero-cover img{
+    width:100%;height:auto;aspect-ratio:1400/595;object-fit:cover;
+    transition:transform .65s cubic-bezier(.16,1,.3,1);
+  }
+  .hero-cover:hover img{transform:scale(1.012)}
   .preface{
     display:grid;grid-template-columns:140px minmax(0,34em);
     gap:clamp(30px,5vw,64px);align-items:start;
@@ -229,7 +243,7 @@
     to{opacity:1;transform:translateY(0)}
   }
   @media (prefers-reduced-motion:no-preference){
-    .preface,.hero-copy{animation:ink-settle .7s .05s both cubic-bezier(.16,1,.3,1)}
+    .preface,.hero-copy,.hero-cover{animation:ink-settle .7s .05s both cubic-bezier(.16,1,.3,1)}
   }
 
   @media (max-width:900px){
@@ -241,6 +255,8 @@
     .opening{
       padding:54px 0 48px;
     }
+    .hero{grid-template-columns:1fr;gap:36px}
+    .hero-cover{width:min(100%,680px)}
     .hero-copy h1{max-width:12em}
     .currents{grid-template-columns:1fr}
     .stream,.stream:first-child,.stream + .stream{
@@ -312,11 +328,14 @@
   </section>
 
   <section class="opening wrap" aria-labelledby="latest-title">
-    <div class="hero-copy">
-      <p class="issue-meta">第 41 期 · 阅读札记</p>
-      <h1 id="latest-title">了不起的盖茨比</h1>
-      <p class="deck">绿灯在对岸，账单在身后。</p>
-      <a class="read-link" href="books/041/">读这一期 <span aria-hidden="true">→</span></a>
+    <div class="hero has-cover">
+      <div class="hero-copy">
+        <p class="issue-meta">第 41 期 · 阅读札记</p>
+        <h1 id="latest-title">了不起的盖茨比</h1>
+        <p class="deck">绿灯在对岸，账单在身后。</p>
+        <a class="read-link" href="books/041/">读这一期 <span aria-hidden="true">→</span></a>
+      </div>
+      <a class="hero-cover" href="books/041/" aria-label="第 41 期 了不起的盖茨比封面"><img src="img/covers/b41-640.webp" srcset="img/covers/b41.webp 1400w, img/covers/b41-640.webp 640w" sizes="(max-width:900px) calc(100vw - 44px), min(46vw, 560px)" alt="第 41 期 了不起的盖茨比封面" width="1400" height="595" loading="eager" decoding="async" fetchpriority="high"></a>
     </div>
   </section>
 

@@ -931,6 +931,42 @@ def upgrade_static_pages(books: list) -> None:
     idx = ROOT / "index.html"
     src = ROOT / "src" / "html" / "index.html"
     s = src.read_text(encoding="utf-8")
+    latest = max((b for b in books if b["no"] > 0), key=lambda b: b["no"])
+    _, latest_note = BOOK_META.get(
+        latest["no"], ("泉森", "刚写完的一期。"))
+    cover_path = ROOT / "img" / "covers" / f'b{latest["no"]:02d}.webp'
+    cover_small = ROOT / "img" / "covers" / f'b{latest["no"]:02d}-{COVER_SMALL_WIDTH}.webp'
+    cover_html = ""
+    cover_class = ""
+    if cover_path.exists():
+        cover_src = f'img/covers/b{latest["no"]:02d}.webp'
+        cover_fallback = cover_src
+        cover_srcset = ""
+        if cover_small.exists():
+            cover_fallback = f'img/covers/b{latest["no"]:02d}-{COVER_SMALL_WIDTH}.webp'
+            cover_srcset = (
+                f' srcset="{cover_src} {COVER_WIDTH}w, '
+                f'{cover_fallback} {COVER_SMALL_WIDTH}w"'
+                ' sizes="(max-width:900px) calc(100vw - 44px), '
+                'min(46vw, 560px)"'
+            )
+        cover_html = (
+            f'<a class="hero-cover" href="books/{latest["slug"]}/" '
+            f'aria-label="第 {latest["no"]} 期 {html.escape(latest["title"])}封面">'
+            f'<img src="{cover_fallback}"{cover_srcset} '
+            f'alt="第 {latest["no"]} 期 {html.escape(latest["title"])}封面" '
+            f'width="{COVER_WIDTH}" height="{COVER_HEIGHT}" '
+            'loading="eager" decoding="async" fetchpriority="high"></a>'
+        )
+        cover_class = " has-cover"
+    s = (
+        s.replace("{{LATEST_NO}}", str(latest["no"]))
+        .replace("{{LATEST_SLUG}}", latest["slug"])
+        .replace("{{LATEST_TITLE}}", html.escape(latest["title"]))
+        .replace("{{LATEST_NOTE}}", html.escape(latest_note))
+        .replace("{{LATEST_COVER}}", cover_html)
+        .replace("{{HERO_COVER_CLASS}}", cover_class)
+    )
     for b in books:
         if b["no"] == 0:
             continue
