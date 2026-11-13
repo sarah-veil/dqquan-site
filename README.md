@@ -100,6 +100,12 @@ python3 build.py audit
 - URL 一律三位补零：`/books/031/`。这样第 100 期是 `100`，字典序不会乱。
 - 旧链接 `/books/31.html` 会以 meta refresh 跳到新地址，不会被搜到（`noindex`）。
 
+## 封面规则
+
+- 每一期 `src/html/NN.html` 都必须有 `img/covers/bNN.webp`；封面从公众号原文抓取。
+- `build.py` 会生成 `bNN-640.webp` 手机版；任一已发布期缺封面时构建直接中止。
+- 首页头条只从最近 10 期里轮动，但封面完整性按全部已发布期检查。
+
 ## 导航约定
 
 导航保持三个词：**阅读 / 影像 / 关于**。

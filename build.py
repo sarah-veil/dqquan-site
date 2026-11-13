@@ -535,15 +535,20 @@ BOOK_SCENES = {
 
 
 def ensure_cover_variants(books: list) -> None:
-    """生成手机用 640px 封面；cwebp 不可用时保留原图回退。"""
-    if not shutil.which("cwebp"):
-        return
+    """每期必须有成版封面，并生成手机用 640px 封面。"""
+    has_cwebp = bool(shutil.which("cwebp"))
+    missing_full = []
+    missing_small = []
     for b in books:
         src = ROOT / "img" / "covers" / f'b{b["no"]:02d}.webp'
         dst = ROOT / "img" / "covers" / f'b{b["no"]:02d}-{COVER_SMALL_WIDTH}.webp'
         if not src.exists():
+            missing_full.append(b["no"])
             continue
         if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+            continue
+        if not has_cwebp:
+            missing_small.append(b["no"])
             continue
         subprocess.run(
             [
@@ -558,6 +563,13 @@ def ensure_cover_variants(books: list) -> None:
             ],
             check=True,
         )
+    if missing_full:
+        labels = "、".join("序" if n == 0 else f"第 {n} 期" for n in missing_full)
+        raise SystemExit(f"!! 封面缺失：{labels} 找不到 img/covers/bNN.webp")
+    if missing_small:
+        labels = "、".join("序" if n == 0 else f"第 {n} 期" for n in missing_small)
+        raise SystemExit(f"!! 封面缺手机版：{labels}，且本机没有 cwebp")
+    print(f"  · 封面：{len(books)} 期完整")
 
 
 # ── 目录页 ───────────────────────────────────────────────────────────
@@ -932,6 +944,7 @@ def upgrade_static_pages(books: list) -> None:
     idx = ROOT / "index.html"
     src = ROOT / "src" / "html" / "index.html"
     s = src.read_text(encoding="utf-8")
+    ensure_cover_variants(books)
     latest = max((b for b in books if b["no"] > 0), key=lambda b: b["no"])
     recent_books = [
         b for b in sorted(
