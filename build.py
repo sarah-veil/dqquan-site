@@ -35,6 +35,7 @@ COVER_WIDTH = 1400
 COVER_HEIGHT = 595
 COVER_SMALL_WIDTH = 640
 COVER_SMALL_HEIGHT = 272
+HERO_RECENT_LIMIT = 10
 CONTACT_EMAIL = "quan@dqquan.com"
 IMAGE_SUFFIXES = {
     ".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".heic", ".avif",
@@ -932,40 +933,68 @@ def upgrade_static_pages(books: list) -> None:
     src = ROOT / "src" / "html" / "index.html"
     s = src.read_text(encoding="utf-8")
     latest = max((b for b in books if b["no"] > 0), key=lambda b: b["no"])
-    _, latest_note = BOOK_META.get(
-        latest["no"], ("泉森", "刚写完的一期。"))
-    cover_path = ROOT / "img" / "covers" / f'b{latest["no"]:02d}.webp'
-    cover_small = ROOT / "img" / "covers" / f'b{latest["no"]:02d}-{COVER_SMALL_WIDTH}.webp'
-    cover_html = ""
-    cover_class = ""
-    if cover_path.exists():
-        cover_src = f'img/covers/b{latest["no"]:02d}.webp'
+    recent_books = [
+        b for b in sorted(
+            (item for item in books if item["no"] > 0),
+            key=lambda item: -item["no"],
+        )
+        if (ROOT / "img" / "covers" / f'b{b["no"]:02d}.webp').exists()
+    ][:HERO_RECENT_LIMIT]
+    if not recent_books:
+        recent_books = [latest]
+
+    hero_slides = []
+    hero_dots = []
+    for position, b in enumerate(recent_books):
+        _, note = BOOK_META.get(b["no"], ("泉森", "刚写完的一期。"))
+        cover_src = f'img/covers/b{b["no"]:02d}.webp'
+        cover_small = ROOT / "img" / "covers" / f'b{b["no"]:02d}-{COVER_SMALL_WIDTH}.webp'
         cover_fallback = cover_src
         cover_srcset = ""
         if cover_small.exists():
-            cover_fallback = f'img/covers/b{latest["no"]:02d}-{COVER_SMALL_WIDTH}.webp'
+            cover_fallback = f'img/covers/b{b["no"]:02d}-{COVER_SMALL_WIDTH}.webp'
             cover_srcset = (
                 f' srcset="{cover_src} {COVER_WIDTH}w, '
                 f'{cover_fallback} {COVER_SMALL_WIDTH}w"'
                 ' sizes="(max-width:900px) calc(100vw - 44px), '
-                'min(46vw, 560px)"'
+                'min(54vw, 640px)"'
             )
+        active = position == 0
+        active_class = " is-active" if active else ""
+        inert = "" if active else " inert"
+        fetch_priority = ' fetchpriority="high"' if active else ""
+        cover_class = " has-cover" if cover_fallback else ""
         cover_html = (
-            f'<a class="hero-cover" href="books/{latest["slug"]}/" '
-            f'aria-label="第 {latest["no"]} 期 {html.escape(latest["title"])}封面">'
+            f'<a class="hero-cover" href="books/{b["slug"]}/" '
+            f'aria-label="第 {b["no"]} 期 {html.escape(b["title"])}封面">'
             f'<img src="{cover_fallback}"{cover_srcset} '
-            f'alt="第 {latest["no"]} 期 {html.escape(latest["title"])}封面" '
+            f'alt="第 {b["no"]} 期 {html.escape(b["title"])}封面" '
             f'width="{COVER_WIDTH}" height="{COVER_HEIGHT}" '
-            'loading="eager" decoding="async" fetchpriority="high"></a>'
+            'loading="eager" decoding="async"'
+            f"{fetch_priority}></a>"
         )
-        cover_class = " has-cover"
+        hero_slides.append(
+            f'<article class="hero-slide{active_class}{cover_class}" '
+            f'id="hero-slide-{b["no"]}" role="group" '
+            f'aria-roledescription="slide" aria-labelledby="hero-title-{b["no"]}" '
+            f'aria-hidden="{"false" if active else "true"}"{inert}>'
+            f'<div class="hero-copy">'
+            f'<p class="issue-meta">第 {b["no"]} 期 · 阅读札记</p>'
+            f'<h2 class="hero-title" id="hero-title-{b["no"]}">{html.escape(b["title"])}</h2>'
+            f'<p class="deck">{html.escape(note)}</p>'
+            f'<a class="read-link" href="books/{b["slug"]}/">读这一期 '
+            '<span aria-hidden="true">→</span></a></div>'
+            f"{cover_html}</article>"
+        )
+        hero_dots.append(
+            f'<button class="hero-dot" type="button" '
+            f'aria-label="显示第 {b["no"]} 期 {html.escape(b["title"])}" '
+            f'aria-controls="hero-slide-{b["no"]}" '
+            f'aria-current="{"true" if active else "false"}"></button>'
+        )
     s = (
-        s.replace("{{LATEST_NO}}", str(latest["no"]))
-        .replace("{{LATEST_SLUG}}", latest["slug"])
-        .replace("{{LATEST_TITLE}}", html.escape(latest["title"]))
-        .replace("{{LATEST_NOTE}}", html.escape(latest_note))
-        .replace("{{LATEST_COVER}}", cover_html)
-        .replace("{{HERO_COVER_CLASS}}", cover_class)
+        s.replace("{{HERO_SLIDES}}", "\n        ".join(hero_slides))
+        .replace("{{HERO_DOTS}}", "\n        ".join(hero_dots))
     )
     for b in books:
         if b["no"] == 0:
