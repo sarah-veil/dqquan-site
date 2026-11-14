@@ -25,6 +25,13 @@ SRC = ROOT / "img" / "countries"
 SIZES = [("w240", 240), ("w480", 480), ("w800", 800), ("w1600", 1600)]
 QUALITY = 82
 
+# 个别图源细节密、82 档出来体积明显超标，单独降档。
+# kenya-01（草原上的雄狮，竖幅 1200×1800）：82 档四档合计 ~756 KB，
+# 降到 50 档后 w800 从 230 KB 降到 115 KB，肉眼对比无差别（2026-11-14 对比过局部裁切）。
+FILE_QUALITY = {
+    "kenya-01": 50,
+}
+
 
 def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
@@ -32,7 +39,15 @@ def run(cmd):
 
 def main():
     check = "--check" in sys.argv
+    # --only <stem>：只重做这一张，不影响其它图
+    only = None
+    if "--only" in sys.argv:
+        i = sys.argv.index("--only")
+        if i + 1 < len(sys.argv):
+            only = sys.argv[i + 1]
     jpgs = sorted(p for p in SRC.glob("*.jpg") if p.is_file())
+    if only:
+        jpgs = [p for p in jpgs if p.stem == only]
     if not jpgs:
         print("没有找到 img/countries/*.jpg")
         return
@@ -48,8 +63,9 @@ def main():
                 print(f"  · {out.relative_to(ROOT)}  (宽 {width})")
                 continue
             out.parent.mkdir(parents=True, exist_ok=True)
+            q = FILE_QUALITY.get(jpg.stem, QUALITY)
             r = run(["magick", str(jpg), "-auto-orient",
-                     "-resize", f"{width}x>", "-quality", str(QUALITY),
+                     "-resize", f"{width}x>", "-quality", str(q),
                      str(out)])
             if r.returncode != 0:
                 print(f"  ✗ {jpg.name} → {sub}: {r.stderr.strip()[:120]}")

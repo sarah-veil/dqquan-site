@@ -371,6 +371,7 @@ def build_book_page(b: dict, books: list) -> None:
         s = s.replace("</style></head>", "</style>" + og + "</head>", 1)
 
     author = BOOK_META.get(b["no"], ("泉森", ""))[0]
+    date_str = BOOK_DATES.get(b["no"], "")
     book_schema = {
         "@context": "https://schema.org",
         "@graph": [
@@ -393,7 +394,21 @@ def build_book_page(b: dict, books: list) -> None:
             },
         ],
     }
+    # 日期要在 add_head_metadata 序列化之前写进 schema
+    if date_str:
+        book_schema["@graph"][0]["datePublished"] = date_str
+        book_schema["@graph"][0]["dateModified"] = date_str
     s = add_head_metadata(s, "../../feed.xml", "book-article", book_schema)
+
+    # 期号旁标出发表日期（只标台账里有确切「已发表」日期的期；没有就留空，不编）
+    if date_str:
+        s = re.sub(
+            r'<div class="meta">[^<]*</div>',
+            f'<div class="meta">{html.escape(label)} · '
+            f'<time datetime="{date_str}">{date_str}</time></div>',
+            s,
+            count=1,
+        )
 
     # 3) 翻页样式
     if "</style>" in s:
@@ -531,6 +546,34 @@ BOOK_SCENES = {
     29: ("colombia-2019", "2019", "colombia-01.jpg", "橙色钟形花前的蜂鸟"),
     30: ("norway-2015", "2015", "norway-03.jpg", "暮色中的水边人家"),
     31: ("peru-2026", "2026", "peru-01.jpg", "悬停的蜂鸟"),
+}
+
+# 各期公众号发表日期（YYYY-MM-DD）。
+# 来源：知识库《发布记录_台账.md》「已发表清单」＋《书单排期_半亩方塘.md》。
+# 只收「已发表」的确切日期；草稿日、推稿日一律不写进来 —— 宁可空着，也不写一个凭猜的日期。
+# 待补：00 01 02 03 07 08 09 23 24 25 30 31 32 33 34 35 36 37 38 39 40
+BOOK_DATES = {
+    4: "2026-09-17",
+    5: "2026-09-17",
+    6: "2026-09-19",
+    10: "2026-09-22",
+    11: "2026-09-24",
+    12: "2026-09-25",
+    13: "2026-09-26",
+    14: "2026-09-27",
+    15: "2026-09-28",
+    16: "2026-09-29",
+    17: "2026-09-30",
+    18: "2026-10-01",
+    19: "2026-10-02",
+    20: "2026-10-02",
+    21: "2026-10-04",
+    22: "2026-10-05",
+    26: "2026-10-10",
+    27: "2026-10-11",
+    28: "2026-10-12",
+    29: "2026-10-13",
+    41: "2026-11-08",
 }
 
 
